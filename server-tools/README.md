@@ -1,6 +1,6 @@
 # Install or update server tools from the REST host
 
-The root `ispconfig-rest` CLI discovers servers in ISPConfig's master database,
+The root `ispconfig-rest` CLI (with this extension installed) discovers servers in ISPConfig's master database,
 checks passwordless SSH, copies the release and runs the existing installers:
 
 | Component | ISPConfig role | Installer |
@@ -21,7 +21,8 @@ privileges. There are no new HTTP endpoints or migrations for this CLI feature.
 
 ## Quick start
 
-Update REST and apply its existing migrations first. Run as root on the REST host:
+Install the hosting extension first (`sudo ispconfig-rest extension:install hosting`; `extension:update` later).
+Run as root on the REST host:
 
 ```sh
 # Database worker, web logs/runtime worker and WAF across the applicable servers:
@@ -158,7 +159,7 @@ described in the [WAF instructions](../waf-server/README.md#ispconfig-directive-
 
 ```sh
 python3 -m unittest discover -s tests/Integration/server-tools -p 'test_*.py'
-php vendor/bin/phpunit --filter ServerTools
+../../vendor/bin/phpunit --filter ServerTools   # from ispconfig-rest/extensions/hosting
 docker build -t ispcp-waf-test tests/Integration/waf
 docker build -t ispcp-server-tools-test -f tests/Integration/server-tools/Dockerfile .
 docker run -d --name ispcp-server-tools-db -e MARIADB_ROOT_PASSWORD=server-tools-fixture-only mariadb:10.11

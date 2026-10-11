@@ -1,8 +1,8 @@
 <?php
 
-namespace Tests\Unit;
+namespace IspconfigRestHosting\Tests\Unit;
 
-use App\Support\PhpLimits;
+use IspconfigRestHosting\Support\PhpLimits;
 use PHPUnit\Framework\TestCase;
 
 /** Planning and rendering of the php-limits worker (spec 053). */

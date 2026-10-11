@@ -1,8 +1,8 @@
 <?php
 
-namespace Tests\Unit;
+namespace IspconfigRestHosting\Tests\Unit;
 
-use App\Support\CronOutputLog;
+use IspconfigRestHosting\Support\CronOutputLog;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 

@@ -1,15 +1,15 @@
 <?php
 
-namespace App\Services;
+namespace IspconfigRestHosting\Services;
 
 use App\Models\CronJob;
 use App\Models\WebDomain;
-use App\Support\CronOutputLog;
-use App\Support\WebLogReader;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
+use IspconfigRestHosting\Support\CronOutputLog;
+use IspconfigRestHosting\Support\WebLogReader;
 use RuntimeException;
 
 final class WebLogService

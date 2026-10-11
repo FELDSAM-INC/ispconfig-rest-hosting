@@ -1,9 +1,9 @@
 <?php
 
-use App\Support\WordPressPolicy;
+use IspconfigRestHosting\Support\WordPressPolicy;
 
 // Disposable Apache fixture: see README.md. Never run on a hosting server.
-require '/app/app/Support/WordPressPolicy.php';
+require '/app/src/Support/WordPressPolicy.php';
 $policy = WordPressPolicy::compile('', WordPressPolicy::SERVER);
 file_put_contents('/etc/apache2/conf-enabled/wp-test.conf', "Listen 8088\n<VirtualHost *:8088>\nDocumentRoot /tmp/wp-test\n<Directory /tmp/wp-test>\nRequire all granted\nAllowOverride All\n</Directory>\n".$policy."</VirtualHost>\n");
 mkdir('/tmp/wp-test/wp-content/uploads', 0755, true);

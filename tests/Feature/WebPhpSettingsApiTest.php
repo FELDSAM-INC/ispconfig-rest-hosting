@@ -1,9 +1,9 @@
 <?php
 
-namespace Tests\Feature;
+namespace IspconfigRestHosting\Tests\Feature;
 
-use App\Services\WebPhpSettingsService;
 use Illuminate\Support\Facades\DB;
+use IspconfigRestHosting\Services\WebPhpSettingsService;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\Support\SitesApiTestCase;
 use Tests\Support\SystemSchema;

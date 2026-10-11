@@ -1,9 +1,9 @@
 <?php
 
-namespace Tests\Feature;
+namespace IspconfigRestHosting\Tests\Feature;
 
-use App\Support\WebWafPolicy;
 use Illuminate\Support\Facades\DB;
+use IspconfigRestHosting\Support\WebWafPolicy;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\Support\SitesApiTestCase;
 use Tests\Support\TenantFixtures;

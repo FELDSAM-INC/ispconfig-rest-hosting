@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Support;
+namespace IspconfigRestHosting\Support;
 
 use PDO;
 use RuntimeException;

@@ -1,14 +1,14 @@
 <?php
 
-namespace App\Http\Controllers\Api\V1\Usage;
+namespace IspconfigRestHosting\Http\Controllers;
 
 use App\Http\Controllers\Controller;
-use App\Services\ResourceUsageService;
 use App\Services\UsageService;
 use App\Support\IspContext;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
+use IspconfigRestHosting\Services\ResourceUsageService;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 
 /**

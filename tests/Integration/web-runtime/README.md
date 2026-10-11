@@ -5,7 +5,8 @@ application values (including configuration/template injection strings), the
 public child directory, exclusion of files in the old web root, and real FPM
 chroots. The nginx directives run through ISPConfig's actual location merger.
 
-From the repository root, with an ISPConfig source checkout at `/tmp/ispconfig3_install`:
+From the repository root, checked out as `extensions/hosting` of an ispconfig-rest checkout with its dependencies
+installed, and an ISPConfig source checkout at `/tmp/ispconfig3_install`:
 
 ```sh
 mkdir -p /tmp/ispcp-runtime-verify
@@ -13,7 +14,7 @@ cp tests/Integration/web-runtime/generate.php tests/Integration/web-runtime/chec
 BUILDX_CONFIG=/tmp/ispcp-runtime-buildx docker build -t ispcp-web-runtime-test tests/Integration/web-runtime
 
 docker run --rm --network none -u "$(id -u):$(id -g)" \
-  -v "$PWD:/app:ro" -v /tmp/ispcp-runtime-verify:/out \
+  -v "$PWD:/app:ro" -v "$(cd ../.. && pwd):/core:ro" -e ISPCONFIG_REST_DIR=/core -v /tmp/ispcp-runtime-verify:/out \
   -v /tmp/ispconfig3_install:/isp:ro -w /app php:8.3-cli php /out/generate.php
 
 docker run --rm --network none -v "$PWD:/app:ro" \

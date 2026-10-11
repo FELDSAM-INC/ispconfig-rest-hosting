@@ -7,10 +7,10 @@ worker_source=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 install -d -m 0700 -o root -g root /usr/local/lib/ispconfig-rest-web-log-worker /var/lib/ispconfig-rest-web-log-worker
 rm -f /usr/local/lib/ispconfig-rest-web-log-worker/runtime-ready
 install -m 0600 -o root -g root "$worker_source/run.php" /usr/local/lib/ispconfig-rest-web-log-worker/
-install -m 0600 -o root -g root "$worker_source/../app/Support/WebLogReader.php" /usr/local/lib/ispconfig-rest-web-log-worker/
-install -m 0600 -o root -g root "$worker_source/../app/Support/WebRuntimeDirectory.php" /usr/local/lib/ispconfig-rest-web-log-worker/
-install -m 0600 -o root -g root "$worker_source/../app/Support/WebPhpDefaults.php" /usr/local/lib/ispconfig-rest-web-log-worker/
-install -m 0600 -o root -g root "$worker_source/../app/Support/CronOutputLog.php" /usr/local/lib/ispconfig-rest-web-log-worker/
+install -m 0600 -o root -g root "$worker_source/../src/Support/WebLogReader.php" /usr/local/lib/ispconfig-rest-web-log-worker/
+install -m 0600 -o root -g root "$worker_source/../src/Support/WebRuntimeDirectory.php" /usr/local/lib/ispconfig-rest-web-log-worker/
+install -m 0600 -o root -g root "$worker_source/../src/Support/WebPhpDefaults.php" /usr/local/lib/ispconfig-rest-web-log-worker/
+install -m 0600 -o root -g root "$worker_source/../src/Support/CronOutputLog.php" /usr/local/lib/ispconfig-rest-web-log-worker/
 install -m 0600 -o root -g root "$worker_source/nginx-runtime.conf" /usr/local/lib/ispconfig-rest-web-log-worker/
 if [ -L /usr/local/ispconfig/server/plugins-enabled/nginx_plugin.inc.php ]; then
     runtime_target=/etc/nginx/conf.d/ispcp-runtime.conf

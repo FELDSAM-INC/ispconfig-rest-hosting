@@ -1,9 +1,9 @@
 <?php
 
 declare(strict_types=1);
-use App\Support\WebWafAudit;
-use App\Support\WebWafPolicy;
-use App\Support\WebWafProfiles;
+use IspconfigRestHosting\Support\WebWafAudit;
+use IspconfigRestHosting\Support\WebWafPolicy;
+use IspconfigRestHosting\Support\WebWafProfiles;
 
 if (PHP_SAPI !== 'cli' || ! function_exists('posix_geteuid') || posix_geteuid() !== 0) {
     exit(1);

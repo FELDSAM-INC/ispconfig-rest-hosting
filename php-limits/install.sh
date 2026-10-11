@@ -4,14 +4,14 @@ set -euo pipefail
 [[ $# = 0 || ( $# = 1 && $1 = --no-restart ) ]] || { echo 'Usage: install.sh [--no-restart]' >&2; exit 1; }
 source_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 # Refuse root execution of code from a web-writable checkout, including writable ancestors.
-for limits_source in "$source_dir" "$source_dir/../app/Support"; do
+for limits_source in "$source_dir" "$source_dir/../src/Support"; do
     limits_source=$(realpath "$limits_source")
     while [[ "$limits_source" != / ]]; do
         [[ $(stat -c %u "$limits_source") = 0 ]] && [[ $(( 8#$(stat -c %a "$limits_source") & 0022 )) = 0 ]] || { echo 'Stage the release in a root-owned, non-writable directory first.' >&2; exit 1; }
         limits_source=$(dirname "$limits_source")
     done
 done
-for limits_file in "$source_dir"/{install.sh,run.php,ispconfig-php-limits} "$source_dir/../app/Support/PhpLimits.php"; do
+for limits_file in "$source_dir"/{install.sh,run.php,ispconfig-php-limits} "$source_dir/../src/Support/PhpLimits.php"; do
     [[ -f "$limits_file" && ! -L "$limits_file" && $(stat -c %u "$limits_file") = 0 ]] && [[ $(( 8#$(stat -c %a "$limits_file") & 0022 )) = 0 ]] || { echo 'Installer files must be regular root-owned files without group/other write access.' >&2; exit 1; }
 done
 [[ -f /usr/local/ispconfig/server/lib/config.inc.php ]] || { echo 'Install on an ISPConfig web server.' >&2; exit 1; }
@@ -26,7 +26,7 @@ systemd_version=$(systemctl --version | awk 'NR == 1 { print $2 }')
 [[ "$systemd_version" =~ ^[0-9]+$ && "$systemd_version" -ge 243 ]] || { echo 'systemd 243 or newer is required.' >&2; exit 1; }
 install -d -m 0700 -o root -g root /usr/local/lib/ispconfig-rest-php-limits /var/lib/ispconfig-rest-php-limits
 install -d -m 0755 -o root -g root /etc/ispconfig-rest-php-limits /etc/ispconfig-rest-php-limits/pools
-install -m 0600 -o root -g root "$source_dir/run.php" "$source_dir/../app/Support/PhpLimits.php" /usr/local/lib/ispconfig-rest-php-limits/
+install -m 0600 -o root -g root "$source_dir/run.php" "$source_dir/../src/Support/PhpLimits.php" /usr/local/lib/ispconfig-rest-php-limits/
 install -m 0755 -o root -g root "$source_dir/ispconfig-php-limits" /usr/local/sbin/ispconfig-php-limits
 /usr/local/sbin/ispconfig-php-limits install-services "$@"
 cat > /etc/cron.d/ispconfig-rest-php-limits <<'CRON'

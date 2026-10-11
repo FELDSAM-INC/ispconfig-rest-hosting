@@ -1,9 +1,9 @@
 <?php
 
-namespace Tests\Feature;
+namespace IspconfigRestHosting\Tests\Feature;
 
-use App\Services\DatabaseOperationService;
 use Illuminate\Support\Facades\DB;
+use IspconfigRestHosting\Services\DatabaseOperationService;
 use Tests\Support\ClientSchema;
 use Tests\Support\SitesApiTestCase;
 use Tests\Support\TenantFixtures;

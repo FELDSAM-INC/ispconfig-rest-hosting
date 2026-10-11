@@ -1,14 +1,14 @@
 <?php
 
-use App\Support\WebWafCrs;
-use App\Support\WebWafProfiles;
+use IspconfigRestHosting\Support\WebWafCrs;
+use IspconfigRestHosting\Support\WebWafProfiles;
 
 // Administrative tool. License data is accepted only on stdin and stored root-only.
 if (PHP_SAPI !== 'cli' || posix_geteuid() !== 0) {
     exit(1);
 }
 foreach (['WebWafProfiles.php', 'WebWafCrs.php'] as $support) {
-    require is_file(__DIR__.'/'.$support) ? __DIR__.'/'.$support : __DIR__.'/../app/Support/'.$support;
+    require is_file(__DIR__.'/'.$support) ? __DIR__.'/'.$support : __DIR__.'/../src/Support/'.$support;
 }
 umask(0077);
 function command(array $argv): void

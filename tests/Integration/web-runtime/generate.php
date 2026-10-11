@@ -1,7 +1,7 @@
 <?php
-require '/app/vendor/autoload.php';
+require '/app/tests/bootstrap.php';
 require '/isp/server/plugins-available/nginx_plugin.inc.php';
-$service = new App\Services\WebRuntimeService;
+$service = new IspconfigRestHosting\Services\WebRuntimeService;
 $site = new App\Models\WebDomain;
 $site->setRawAttributes(['type'=>'vhost','web_folder'=>'','php'=>'php-fpm','php_fpm_chroot'=>'n']);
 $settings = ['document_root_subdir'=>'public', 'environment'=>[

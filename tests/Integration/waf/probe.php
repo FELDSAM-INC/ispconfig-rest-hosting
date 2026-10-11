@@ -1,9 +1,9 @@
 <?php
 
-require '/app/app/Support/WebWafProfiles.php';
-require '/app/app/Support/WebWafPolicy.php';
-use App\Support\WebWafPolicy;
-use App\Support\WebWafProfiles;
+require '/app/src/Support/WebWafProfiles.php';
+require '/app/src/Support/WebWafPolicy.php';
+use IspconfigRestHosting\Support\WebWafPolicy;
+use IspconfigRestHosting\Support\WebWafProfiles;
 
 $mode = $argv[1] ?? 'detection';
 $site = ['domain_id' => 1, 'server_id' => 1, 'sys_groupid' => 5, 'domain' => 'waf.test'];

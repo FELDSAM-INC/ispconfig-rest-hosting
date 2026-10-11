@@ -1,8 +1,8 @@
 <?php
 
-namespace Tests\Unit;
+namespace IspconfigRestHosting\Tests\Unit;
 
-use App\Support\WebLogReader;
+use IspconfigRestHosting\Support\WebLogReader;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 

@@ -1,0 +1,29 @@
+# Paths of the hosting extension (spec 058), merged into ispconfig-rest's served OpenAPI document. References use
+# the same layout as core's api/ directory; files missing there are served from this one.
+paths:
+  /usage/resources:
+    $ref: './modules/usage/resources.yaml#/~1usage~1resources'
+  /sites/web-domains/{id}/wordpress:
+    $ref: './modules/sites/wordpress.yaml#/~1sites~1web-domains~1{id}~1wordpress'
+  /sites/web-domains/{id}/wordpress/jobs:
+    $ref: './modules/sites/wordpress.yaml#/~1sites~1web-domains~1{id}~1wordpress~1jobs'
+  /sites/web-domains/{id}/wordpress/jobs/{job}:
+    $ref: './modules/sites/wordpress.yaml#/~1sites~1web-domains~1{id}~1wordpress~1jobs~1{job}'
+  /sites/web-domains/{id}/waf:
+    $ref: './modules/sites/web-waf.yaml#/~1sites~1web-domains~1{id}~1waf'
+  /sites/web-domains/{id}/waf/events:
+    $ref: './modules/sites/web-waf.yaml#/~1sites~1web-domains~1{id}~1waf~1events'
+  /sites/web-domains/{id}/logs/{kind}:
+    $ref: './modules/sites/web-logs.yaml#/~1sites~1web-domains~1{id}~1logs~1{kind}'
+  /sites/databases/{id}/operations:
+    $ref: './modules/sites/database-operations.yaml#~1sites~1databases~1{id}~1operations'
+  /sites/databases/{id}/operations/{operation}:
+    $ref: './modules/sites/database-operations.yaml#~1sites~1databases~1{id}~1operations~1{operation}'
+  /sites/databases/{id}/operations/{operation}/chunks/{sequence}:
+    $ref: './modules/sites/database-operations.yaml#~1sites~1databases~1{id}~1operations~1{operation}~1chunks~1{sequence}'
+  /sites/databases/{id}/operations/{operation}/upload-complete:
+    $ref: './modules/sites/database-operations.yaml#~1sites~1databases~1{id}~1operations~1{operation}~1upload-complete'
+  /sites/databases/{id}/operations/{operation}/download:
+    $ref: './modules/sites/database-operations.yaml#~1sites~1databases~1{id}~1operations~1{operation}~1download'
+  /sites/cron-jobs/{id}/log:
+    $ref: './modules/sites/cron-job-logs.yaml#/~1sites~1cron-jobs~1{id}~1log'

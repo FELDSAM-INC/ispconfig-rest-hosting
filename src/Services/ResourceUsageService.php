@@ -1,7 +1,8 @@
 <?php
 
-namespace App\Services;
+namespace IspconfigRestHosting\Services;
 
+use App\Services\TrafficPeriodService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;

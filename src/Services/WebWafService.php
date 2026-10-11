@@ -1,15 +1,15 @@
 <?php
 
-namespace App\Services;
+namespace IspconfigRestHosting\Services;
 
 use App\Models\WebDomain;
-use App\Support\WebWafAudit;
-use App\Support\WebWafPolicy;
-use App\Support\WebWafProfiles;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
 use InvalidArgumentException;
+use IspconfigRestHosting\Support\WebWafAudit;
+use IspconfigRestHosting\Support\WebWafPolicy;
+use IspconfigRestHosting\Support\WebWafProfiles;
 use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
 
 final class WebWafService

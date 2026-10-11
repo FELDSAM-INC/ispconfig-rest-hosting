@@ -1,12 +1,12 @@
 <?php
 
-namespace Tests\Feature;
+namespace IspconfigRestHosting\Tests\Feature;
 
 use App\Models\WebDomain;
-use App\Services\WordPressService;
-use App\Support\WordPressPolicy;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use IspconfigRestHosting\Services\WordPressService;
+use IspconfigRestHosting\Support\WordPressPolicy;
 use Tests\Support\SitesApiTestCase;
 use Tests\Support\TenantFixtures;
 use Tests\Support\TenantSchema;

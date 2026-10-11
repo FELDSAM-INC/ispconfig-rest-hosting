@@ -1,6 +1,6 @@
 <?php
 
-namespace Tests\Feature;
+namespace IspconfigRestHosting\Tests\Feature;
 
 use Illuminate\Support\Facades\DB;
 use Tests\Support\UsageApiTestCase;

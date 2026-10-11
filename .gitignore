@@ -1,0 +1,3 @@
+__pycache__/
+.phpunit.result.cache
+.phpunit.cache/

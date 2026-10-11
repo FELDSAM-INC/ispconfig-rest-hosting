@@ -1,11 +1,11 @@
 <?php
 
-namespace Tests\Feature;
+namespace IspconfigRestHosting\Tests\Feature;
 
 use App\Models\WebDomain;
-use App\Services\WebRuntimeService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
+use IspconfigRestHosting\Services\WebRuntimeService;
 use Mockery;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\Support\SitesApiTestCase;

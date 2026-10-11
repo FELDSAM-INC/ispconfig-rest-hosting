@@ -1,8 +1,8 @@
 <?php
 
-namespace Tests\Unit;
+namespace IspconfigRestHosting\Tests\Unit;
 
-use App\Support\WebRuntimeDirectory;
+use IspconfigRestHosting\Support\WebRuntimeDirectory;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 

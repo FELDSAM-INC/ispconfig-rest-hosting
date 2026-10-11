@@ -1,11 +1,11 @@
 <?php
 
-use App\Support\WebWafIspconfigSecurity;
+use IspconfigRestHosting\Support\WebWafIspconfigSecurity;
 
 if (PHP_SAPI !== 'cli' || posix_geteuid() !== 0) {
     exit(1);
 }
-require __DIR__.'/../app/Support/WebWafIspconfigSecurity.php';
+require __DIR__.'/../src/Support/WebWafIspconfigSecurity.php';
 umask(0077);
 $directory = '/usr/local/ispconfig/security';
 

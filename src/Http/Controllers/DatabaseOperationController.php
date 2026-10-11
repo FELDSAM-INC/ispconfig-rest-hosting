@@ -1,14 +1,14 @@
 <?php
 
-namespace App\Http\Controllers\Api\V1;
+namespace IspconfigRestHosting\Http\Controllers;
 
 use App\Http\Controllers\Controller;
-use App\Http\Requests\StoreDatabaseOperationChunkRequest;
-use App\Http\Requests\StoreDatabaseOperationRequest;
 use App\Models\WebDatabase;
-use App\Services\DatabaseOperationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
+use IspconfigRestHosting\Http\Requests\StoreDatabaseOperationChunkRequest;
+use IspconfigRestHosting\Http\Requests\StoreDatabaseOperationRequest;
+use IspconfigRestHosting\Services\DatabaseOperationService;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 

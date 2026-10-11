@@ -1,8 +1,8 @@
 <?php
 
-namespace Tests\Unit;
+namespace IspconfigRestHosting\Tests\Unit;
 
-use App\Support\WebWafAudit;
+use IspconfigRestHosting\Support\WebWafAudit;
 use PHPUnit\Framework\TestCase;
 
 final class WebWafAuditTest extends TestCase

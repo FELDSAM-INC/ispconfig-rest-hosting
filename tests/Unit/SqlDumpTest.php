@@ -1,6 +1,6 @@
 <?php
 
-namespace Tests\Unit;
+namespace IspconfigRestHosting\Tests\Unit;
 
 use IspconfigRest\Worker\SqlDump;
 use PHPUnit\Framework\TestCase;

@@ -1,8 +1,8 @@
 <?php
 
-namespace Tests\Unit;
+namespace IspconfigRestHosting\Tests\Unit;
 
-use App\Support\WebPhpDefaults;
+use IspconfigRestHosting\Support\WebPhpDefaults;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 

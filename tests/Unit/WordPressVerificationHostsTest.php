@@ -1,8 +1,8 @@
 <?php
 
-namespace Tests\Unit;
+namespace IspconfigRestHosting\Tests\Unit;
 
-use App\Support\WebDomainAutoalias;
+use IspconfigRestHosting\Support\WebDomainAutoalias;
 use PDO;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;

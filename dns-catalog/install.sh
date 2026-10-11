@@ -4,14 +4,14 @@ set -euo pipefail
 [[ $# = 0 || ( $# = 2 && $1 = --catalog ) ]] || { echo 'Usage: install.sh [--catalog NAME]' >&2; exit 1; }
 source_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 # Refuse root execution of code from a web-writable checkout, including writable ancestors.
-for catalog_source in "$source_dir" "$source_dir/../app/Support"; do
+for catalog_source in "$source_dir" "$source_dir/../src/Support"; do
     catalog_source=$(realpath "$catalog_source")
     while [[ "$catalog_source" != / ]]; do
         [[ $(stat -c %u "$catalog_source") = 0 ]] && [[ $(( 8#$(stat -c %a "$catalog_source") & 0022 )) = 0 ]] || { echo 'Stage the release in a root-owned, non-writable directory first.' >&2; exit 1; }
         catalog_source=$(dirname "$catalog_source")
     done
 done
-for catalog_file in "$source_dir"/{install.sh,run.php,ispconfig-dns-catalog} "$source_dir/../app/Support/DnsCatalog.php"; do
+for catalog_file in "$source_dir"/{install.sh,run.php,ispconfig-dns-catalog} "$source_dir/../src/Support/DnsCatalog.php"; do
     [[ -f "$catalog_file" && ! -L "$catalog_file" && $(stat -c %u "$catalog_file") = 0 ]] && [[ $(( 8#$(stat -c %a "$catalog_file") & 0022 )) = 0 ]] || { echo 'Installer files must be regular root-owned files without group/other write access.' >&2; exit 1; }
 done
 [[ -f /usr/local/ispconfig/server/lib/config.inc.php ]] || { echo 'Install on an ISPConfig DNS server.' >&2; exit 1; }
@@ -22,7 +22,7 @@ for tool in named named-checkconf named-checkzone rndc tsig-keygen systemctl; do
 done
 install -d -m 0700 -o root -g root /usr/local/lib/ispconfig-dns-catalog
 install -d -m 0700 -o root -g root /etc/ispconfig-dns-catalog
-install -m 0600 -o root -g root "$source_dir/run.php" "$source_dir/../app/Support/DnsCatalog.php" /usr/local/lib/ispconfig-dns-catalog/
+install -m 0600 -o root -g root "$source_dir/run.php" "$source_dir/../src/Support/DnsCatalog.php" /usr/local/lib/ispconfig-dns-catalog/
 install -m 0755 -o root -g root "$source_dir/ispconfig-dns-catalog" /usr/local/sbin/ispconfig-dns-catalog
 /usr/local/sbin/ispconfig-dns-catalog install "$@"
 # ISPConfig rewrites named.conf.local whenever a zone is added, changed, disabled or removed: follow it within

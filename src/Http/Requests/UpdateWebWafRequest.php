@@ -1,14 +1,15 @@
 <?php
 
-namespace App\Http\Requests;
+namespace IspconfigRestHosting\Http\Requests;
 
+use App\Http\Requests\SitesRequest;
 use App\Models\WebDomain;
 use App\Support\IspContext;
-use App\Support\WebWafPolicy;
-use App\Support\WebWafProfiles;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
 use InvalidArgumentException;
+use IspconfigRestHosting\Support\WebWafPolicy;
+use IspconfigRestHosting\Support\WebWafProfiles;
 
 final class UpdateWebWafRequest extends SitesRequest
 {

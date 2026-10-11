@@ -2,8 +2,8 @@
 
 declare(strict_types=1);
 
-use App\Support\WebDomainAutoalias;
-use App\Support\WordPressPolicy;
+use IspconfigRestHosting\Support\WebDomainAutoalias;
+use IspconfigRestHosting\Support\WordPressPolicy;
 
 /** Root-owned bridge. All WordPress code runs in the separate UID sandbox. */
 final class WordPressWorker

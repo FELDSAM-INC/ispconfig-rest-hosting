@@ -2,10 +2,10 @@
 
 declare(strict_types=1);
 
-use App\Support\CronOutputLog;
-use App\Support\WebLogReader;
-use App\Support\WebPhpDefaults;
-use App\Support\WebRuntimeDirectory;
+use IspconfigRestHosting\Support\CronOutputLog;
+use IspconfigRestHosting\Support\WebLogReader;
+use IspconfigRestHosting\Support\WebPhpDefaults;
+use IspconfigRestHosting\Support\WebRuntimeDirectory;
 
 if (PHP_SAPI !== 'cli' || ! function_exists('posix_geteuid') || posix_geteuid() !== 0) {
     exit("Run the installed root-owned web log worker as root.\n");

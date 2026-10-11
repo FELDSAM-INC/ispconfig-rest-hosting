@@ -1,6 +1,6 @@
 # WordPress detection and security milestone
 
-Run policy/API/tenant/locking tests with `php vendor/bin/phpunit tests/Feature/WordPressApiTest.php`.
+Run policy/API/tenant/locking tests with `../../vendor/bin/phpunit tests/Feature/WordPressApiTest.php`.
 Run worker boundary, rollback, interrupted recovery, config compare-and-swap and
 cleanup tests with `python3 -m unittest discover -s tests/WordPress`.
 
