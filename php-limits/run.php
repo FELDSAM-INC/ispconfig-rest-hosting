@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-use App\Support\PhpLimits;
+use IspconfigRestHosting\Support\PhpLimits;
 
 /*
  * php-limits worker (spec 053). Commands:

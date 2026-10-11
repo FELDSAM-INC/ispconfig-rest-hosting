@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+#
+# Commands of the hosting extension. The ispconfig-rest manager runs this file as root from its verified copy in
+# /usr/local/lib/ispconfig-rest-cli/extensions/hosting (spec 058), never from the web-owned checkout, with
+# ISPCONFIG_REST_{INSTALL_DIR,RUN_USER,PHP,EXTENSION_DIR,EXTENSION_REF} set.
+set -euo pipefail
+
+COMMANDS=" server-tools workers:install workers:update waf:install waf:update php-limits:install php-limits:update dns-catalog:install dns-catalog:update "
+
+case "${1:-}" in
+  --handles) [[ "$COMMANDS" == *" ${2:-} "* ]]; exit;;
+  --help)
+    cat <<'HELP'
+  ispconfig-rest server-tools install|update|status [OPTIONS]  workers + WAF on ISPConfig servers (hosting)
+  ispconfig-rest server-tools install --help      SSH, server selection and component options
+  ispconfig-rest php-limits:install|update [OPTIONS]  PHP-FPM cgroup limits (restarts PHP-FPM once)
+  ispconfig-rest dns-catalog:install|update [OPTIONS] DNS catalog zone for secondaries (DNS servers)
+HELP
+    exit 0;;
+esac
+
+: "${ISPCONFIG_REST_INSTALL_DIR:?Run through the ispconfig-rest manager.}" "${ISPCONFIG_REST_RUN_USER:?}" "${ISPCONFIG_REST_EXTENSION_DIR:?}" "${ISPCONFIG_REST_EXTENSION_REF:?}"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+server_tools() {
+  command -v python3 >/dev/null || { echo "Install Python 3.8+ on this REST host first." >&2; exit 1; }
+  ISPCP_TOOLS_INSTALL_DIR="$ISPCONFIG_REST_INSTALL_DIR" ISPCP_TOOLS_SOURCE_DIR="$ISPCONFIG_REST_EXTENSION_DIR" \
+    ISPCP_TOOLS_RUN_USER="$ISPCONFIG_REST_RUN_USER" ISPCP_TOOLS_PHP="${ISPCONFIG_REST_PHP:-php}" \
+    ISPCP_TOOLS_BRANCH="$ISPCONFIG_REST_EXTENSION_REF" exec python3 "$here/server-tools/manage.py" "$@"
+}
+
+command="$1"
+shift
+case "$command" in
+  server-tools) server_tools "$@";;
+  *:install|*:update)
+    group="${command%%:*}"
+    case "$group" in
+      waf|php-limits|dns-catalog) components="$group";;
+      *) components=database,web-logs,file-manager;;
+    esac
+    server_tools "${command#*:}" --components "$components" "$@";;
+esac

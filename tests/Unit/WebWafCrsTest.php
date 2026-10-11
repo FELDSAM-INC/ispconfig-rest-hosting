@@ -1,9 +1,9 @@
 <?php
 
-namespace Tests\Unit;
+namespace IspconfigRestHosting\Tests\Unit;
 
-use App\Support\WebWafCrs;
-use App\Support\WebWafProfiles;
+use IspconfigRestHosting\Support\WebWafCrs;
+use IspconfigRestHosting\Support\WebWafProfiles;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 

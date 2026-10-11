@@ -1,15 +1,16 @@
 <?php
 
-namespace App\Services;
+namespace IspconfigRestHosting\Services;
 
 use App\Models\WebDatabase;
 use App\Models\WebDomain;
+use App\Services\LockedClientGuard;
 use App\Support\IspContext;
-use App\Support\WordPressPolicy;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
+use IspconfigRestHosting\Support\WordPressPolicy;
 use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
 
 final class WordPressService

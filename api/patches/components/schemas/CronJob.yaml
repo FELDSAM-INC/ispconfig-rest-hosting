@@ -1,0 +1,23 @@
+# Scheduled task fields of the hosting extension.
+# Merged into ispconfig-rest's components/schemas/CronJob.yaml when it is served (spec 058).
+properties:
+  output_log:
+    type: boolean
+    default: false
+    description: |
+      Own output log of this task (spec 054): every run's standard output and errors, with its time and exit status,
+      are appended as the website user to the website's private/.ispcp-cron-<token>.log, readable through
+      `GET /sites/cron-jobs/{id}/log`. The native command then starts with a managed prefix that this API never
+      returns; `command` stays the task's own command. For chrooted tasks a leading document root is removed from the
+      command, as ISPConfig does. Not available for URL tasks, which ignore it.
+    example: true
+
+  wordpress:
+    type: [object, 'null']
+    readOnly: true
+    description: Managed WordPress task; change its schedule or stop takeover through the website WordPress jobs endpoint, not ordinary cron update/delete.
+    properties:
+      website_id: {type: integer}
+      installation: {type: string, pattern: '^[a-f0-9]{32}$'}
+      state: {type: string, enum: [disabled, enabling, active, disabling, error]}
+      last_run: {type: [string, 'null'], format: date-time}

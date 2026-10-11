@@ -1,7 +1,7 @@
 #!/bin/bash
 # Inside the disposable primary: an ISPConfig DNS server layout, then the real installer from a root-owned release.
 set -euo pipefail
-mkdir -p /usr/local/ispconfig/server/{lib,plugins-available,plugins-enabled} /opt/release/app/Support
+mkdir -p /usr/local/ispconfig/server/{lib,plugins-available,plugins-enabled} /opt/release/src/Support
 printf '<?php\n' > /usr/local/ispconfig/server/lib/config.inc.php
 touch /usr/local/ispconfig/server/plugins-available/bind_plugin.inc.php
 ln -s /usr/local/ispconfig/server/plugins-available/bind_plugin.inc.php /usr/local/ispconfig/server/plugins-enabled/
@@ -22,7 +22,7 @@ zone() { printf '$TTL 300\n@ IN SOA ns1.%s. hostmaster.%s. ( %s 3600 600 86400 3
 zone a.test 1 192.0.2.80; zone b.test 1 192.0.2.81; zone c.test 1 192.0.2.82
 printf 'zone "a.test" {\n        type master;\n        file "/etc/bind/pri.a.test";\n};\nzone "b.test" {\n        type master;\n        allow-transfer {192.0.2.1;};\n        file "/etc/bind/pri.b.test";\n};\n' > /etc/bind/named.conf.local
 named -u bind -c /etc/bind/named.conf
-cp -R /app/dns-catalog /opt/release/ && cp /app/app/Support/DnsCatalog.php /opt/release/app/Support/
+cp -R /app/dns-catalog /opt/release/ && cp /app/src/Support/DnsCatalog.php /opt/release/src/Support/
 chown -R root:root /opt/release && chmod -R go-w /opt/release
 bash /opt/release/dns-catalog/install.sh --catalog catalog.ns1.test.invalid
 ispconfig-dns-catalog status

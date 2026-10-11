@@ -1,14 +1,14 @@
 <?php
 
-namespace App\Http\Controllers\Api\V1;
+namespace IspconfigRestHosting\Http\Controllers;
 
 use App\Http\Concerns\ReadsAccountQuery;
 use App\Http\Controllers\Controller;
 use App\Models\CronJob;
 use App\Models\WebDomain;
-use App\Services\WebLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use IspconfigRestHosting\Services\WebLogService;
 
 final class WebLogController extends Controller
 {

@@ -1,10 +1,10 @@
 <?php
 
-namespace Tests\Feature;
+namespace IspconfigRestHosting\Tests\Feature;
 
-use App\Services\ClientResourceLimitsService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use IspconfigRestHosting\Services\ClientResourceLimitsService;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\Support\ClientApiTestCase;
 use Tests\Support\SitesSchema;

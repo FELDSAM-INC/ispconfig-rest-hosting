@@ -20,21 +20,21 @@ COMPONENTS = ("database", "web-logs", "file-manager", "waf", "php-limits", "dns-
 # php-limits restarts PHP-FPM once when installed and dns-catalog opens zone transfers to a TSIG key, so they are
 # only installed when selected.
 DEFAULT_COMPONENTS = ("database", "web-logs", "file-manager", "waf")
-REPOSITORY = "https://github.com/FELDSAM-INC/ispconfig-rest.git"
+REPOSITORY = "https://github.com/FELDSAM-INC/ispconfig-rest-hosting.git"
 FILES = (
     "worker/install.sh", "worker/run.php", "worker/DatabaseWorker.php", "worker/SqlDump.php",
     "web-log-worker/install.sh", "web-log-worker/run.php", "web-log-worker/nginx-runtime.conf",
-    "app/Support/WebLogReader.php", "app/Support/WebRuntimeDirectory.php", "app/Support/WebPhpDefaults.php", "app/Support/CronOutputLog.php",
+    "src/Support/WebLogReader.php", "src/Support/WebRuntimeDirectory.php", "src/Support/WebPhpDefaults.php", "src/Support/CronOutputLog.php",
     "file-manager-worker/install.sh", "file-manager-worker/reconcile.py", "file-manager-worker/sites.php",
     "file-manager-worker/wordpress-install.sh", "file-manager-worker/wordpress.php", "file-manager-worker/WordPressWorker.php",
-    "file-manager-worker/wordpress-sandbox.py", "file-manager-worker/wordpress-tools.py", "app/Support/WordPressPolicy.php", "app/Support/WebDomainAutoalias.php",
+    "file-manager-worker/wordpress-sandbox.py", "file-manager-worker/wordpress-tools.py", "src/Support/WordPressPolicy.php", "src/Support/WebDomainAutoalias.php",
     "file-manager-worker/sshd.conf", "waf-server/install.sh", "waf-server/run.php",
     "waf-server/configure.php", "waf-server/crs.json", "waf-server/crs-release-key.gpg",
     "waf-server/ispconfig-security.php", "waf-server/ispconfig-waf",
-    "app/Support/WebWafPolicy.php", "app/Support/WebWafAudit.php", "app/Support/WebWafProfiles.php",
-    "app/Support/WebWafCrs.php", "app/Support/WebWafIspconfigSecurity.php", "php-limits/install.sh", "php-limits/run.php",
-    "php-limits/ispconfig-php-limits", "app/Support/PhpLimits.php", "server-tools/remote.php",
-    "dns-catalog/install.sh", "dns-catalog/run.php", "dns-catalog/ispconfig-dns-catalog", "app/Support/DnsCatalog.php",
+    "src/Support/WebWafPolicy.php", "src/Support/WebWafAudit.php", "src/Support/WebWafProfiles.php",
+    "src/Support/WebWafCrs.php", "src/Support/WebWafIspconfigSecurity.php", "php-limits/install.sh", "php-limits/run.php",
+    "php-limits/ispconfig-php-limits", "src/Support/PhpLimits.php", "server-tools/remote.php",
+    "dns-catalog/install.sh", "dns-catalog/run.php", "dns-catalog/ispconfig-dns-catalog", "src/Support/DnsCatalog.php",
 )
 
 
@@ -189,14 +189,14 @@ def package_release(args, directory, run_as):
     else:
         commit = run(run_as + ["git", "rev-parse", "HEAD"]).decode().strip()
         if not re.fullmatch(r"[0-9a-f]{40}", commit):
-            raise Failure("Cannot determine the installed API release commit.")
-        print(f"Fetching trusted worker sources for installed API commit {commit} from {REPOSITORY}", flush=True)
+            raise Failure("Cannot determine the installed hosting extension commit.")
+        print(f"Fetching trusted worker sources for installed hosting commit {commit} from {REPOSITORY}", flush=True)
         repo = directory / "git"
         run(["git", "init", "--bare", str(repo)])
         git = ["git", "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", "-C", str(repo)]
         branch = os.environ.get("ISPCP_TOOLS_BRANCH", "main")
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_./-]*", branch) or ".." in branch:
-            raise Failure("Invalid release branch in install.conf.")
+            raise Failure("Invalid hosting extension ref in install.conf.")
         run(git + ["fetch", "--no-tags", REPOSITORY, branch], timeout=300)
         # A public object reachable only via a fork/PR must not qualify as trusted code.
         run(git + ["merge-base", "--is-ancestor", commit, "FETCH_HEAD"])
@@ -275,9 +275,11 @@ def main(argv=None):
         except ValueError as error:
             raise Failure("Use --host ID=HOST.") from error
     install_dir = os.environ.get("ISPCP_TOOLS_INSTALL_DIR", "")
+    # The extension's own checkout (ispconfig-rest/extensions/hosting), whose published commit is packaged.
+    source_dir = os.environ.get("ISPCP_TOOLS_SOURCE_DIR", install_dir)
     run_user = os.environ.get("ISPCP_TOOLS_RUN_USER", "")
     php = os.environ.get("ISPCP_TOOLS_PHP", "php")
-    if not install_dir.startswith("/") or not re.fullmatch(r"[a-z_][a-z0-9_-]*[$]?", run_user) or run_user == "root":
+    if not install_dir.startswith("/") or not source_dir.startswith("/") or not re.fullmatch(r"[a-z_][a-z0-9_-]*[$]?", run_user) or run_user == "root":
         raise Failure("Use the installed ispconfig-rest manager; an unprivileged API run user is required.")
     run_as = ["sudo", "-u", run_user, "--", "env", "-C", install_dir, php]
     rows = inventory(run(run_as + ["artisan", "server-tools:inventory", "--no-ansi"]), args.server, overrides)
@@ -334,7 +336,7 @@ def main(argv=None):
     trusted(base)
     with tempfile.TemporaryDirectory(prefix="release-", dir=base) as work:
         # Fetch/stage before grants; invalid or unpublished revisions cannot change SQL privileges.
-        package = package_release(args, Path(work), ["sudo", "-u", run_user, "--", "env", "-C", install_dir])
+        package = package_release(args, Path(work), ["sudo", "-u", run_user, "--", "env", "-C", source_dir])
         for target, selected, probe in plan:
             if probe["grants"]["missing"]:
                 run([php, str(helper), "grant"], data=json.dumps(probe["grants"]).encode(), live=True)

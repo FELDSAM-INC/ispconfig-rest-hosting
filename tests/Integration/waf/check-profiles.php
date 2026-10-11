@@ -1,7 +1,7 @@
 <?php
 
-require '/app/app/Support/WebWafProfiles.php';
-use App\Support\WebWafProfiles;
+require '/app/src/Support/WebWafProfiles.php';
+use IspconfigRestHosting\Support\WebWafProfiles;
 
 function same($expected, $actual): void
 {

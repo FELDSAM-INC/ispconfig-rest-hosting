@@ -1,0 +1,83 @@
+# Website fields of the hosting extension.
+# Merged into ispconfig-rest's components/schemas/WebDomain.yaml when it is served (spec 058).
+properties:
+  wordpress:
+    type: object
+    readOnly: true
+    properties:
+      available: {type: boolean}
+      count: {type: integer, minimum: 0}
+      installations:
+        type: array
+        description: Cached public identity of detected installations; contains no database credentials, undo data or filesystem settings.
+        items:
+          type: object
+          properties:
+            id: {type: string}
+            path: {type: string}
+            title: {type: string}
+            url: {type: string}
+            admin_url: {type: string}
+            checks:
+              type: object
+              description: |
+                State for list badges: security measures the website's server and worker can apply, counted by their
+                last checked status; the managed wp-cron schedule; the last core file check (null before one).
+              properties:
+                security:
+                  type: object
+                  properties:
+                    ok: {type: integer}
+                    warning: {type: integer}
+                    danger: {type: integer}
+                cron: {type: string, enum: [disabled, enabling, active, disabling, error]}
+                integrity: {type: string, enum: [clean, modified], nullable: true}
+
+  waf_available: {type: boolean, readOnly: true, description: WAF server tool is installed and reporting a current heartbeat.}
+
+  waf_mode:
+    type: string
+    enum: ['off', detection, enforcing]
+    nullable: true
+    readOnly: true
+    description: WAF state of the website from its managed configuration; `off` also when it was never configured, null when the managed block was changed outside the API.
+
+  runtime_settings:
+    description: |
+      Returned by `GET /sites/web-domains/{id}`, accepted by `PUT`. A relative public subdirectory and literal
+      application environment for primary and child vhosts. The optional reader verifies folders on the actual web
+      server before any website changes are saved; failed checks leave every website setting unchanged. Empty values
+      restore the base folder/remove variables. See web-log-worker/README.md of ispconfig-rest-hosting for deployment
+      requirements. Simple aliases inherit the parent.
+    allOf:
+      - $ref: './WebRuntimeSettings.yaml'
+
+  php_settings:
+    description: |
+      Returned by `GET /sites/web-domains/{id}` (PHP limits reflect the selected server/version configuration),
+      accepted by `PUT`: only the eight editable properties. Limits and disable_functions are read-only;
+      opcache_get_status changes only that function's entry. The selected server/version must have a recent worker
+      snapshot. Required snippets and later CGI INI files remain authoritative; PHP-FPM cannot enable a globally
+      disabled function. Other custom INI entries are preserved. The structured object cannot be combined with raw
+      custom_php_ini. Malformed or forbidden settings return 422 without any datalog write.
+    allOf:
+      - $ref: './WebPhpSettings.yaml'
+
+  runtime_capabilities:
+    type: object
+    readOnly: true
+    additionalProperties: false
+    required: [document_root_available, environment_available]
+    description: Availability of runtime controls in list and detail responses; contains no environment values or directives.
+    properties:
+      document_root_available:
+        type: boolean
+        description: A current reader can verify folders on the website's server.
+      environment_available:
+        type: boolean
+        description: Apache, or nginx with the upgraded reader/constants installed.
+
+  logs_available:
+    type: boolean
+    readOnly: true
+    description: Per-website access/error log previews are available locally or through a current web log worker.

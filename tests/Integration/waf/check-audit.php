@@ -1,10 +1,10 @@
 <?php
 
-require '/app/app/Support/WebWafProfiles.php';
-require '/app/app/Support/WebWafPolicy.php';
-require '/app/app/Support/WebWafAudit.php';
-use App\Support\WebWafAudit;
-use App\Support\WebWafPolicy;
+require '/app/src/Support/WebWafProfiles.php';
+require '/app/src/Support/WebWafPolicy.php';
+require '/app/src/Support/WebWafAudit.php';
+use IspconfigRestHosting\Support\WebWafAudit;
+use IspconfigRestHosting\Support\WebWafPolicy;
 
 $identity = WebWafPolicy::identity(['domain_id' => 1, 'server_id' => 1, 'sys_groupid' => 5, 'domain' => 'waf.test']);
 $catalog = WebWafAudit::catalog();

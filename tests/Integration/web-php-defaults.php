@@ -1,9 +1,9 @@
 <?php
 
 // Run in a disposable root container; tests the root-owned worker's real filesystem checks.
-require __DIR__.'/../../app/Support/WebPhpDefaults.php';
+require __DIR__.'/../../src/Support/WebPhpDefaults.php';
 
-use App\Support\WebPhpDefaults;
+use IspconfigRestHosting\Support\WebPhpDefaults;
 
 if (posix_geteuid() !== 0) {
     throw new RuntimeException('Root fixture required');

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-use App\Support\DnsCatalog;
+use IspconfigRestHosting\Support\DnsCatalog;
 
 // Root tool of the ISPConfig DNS server (spec 055): keeps the catalog zone equal to the primary zones ISPConfig writes.
 if (PHP_SAPI !== 'cli' || ! function_exists('posix_geteuid') || posix_geteuid() !== 0) {
@@ -10,7 +10,7 @@ if (PHP_SAPI !== 'cli' || ! function_exists('posix_geteuid') || posix_geteuid() 
     exit(1);
 }
 umask(0022);
-require is_file(__DIR__.'/DnsCatalog.php') ? __DIR__.'/DnsCatalog.php' : __DIR__.'/../app/Support/DnsCatalog.php';
+require is_file(__DIR__.'/DnsCatalog.php') ? __DIR__.'/DnsCatalog.php' : __DIR__.'/../src/Support/DnsCatalog.php';
 
 const CONFIG = '/etc/ispconfig-dns-catalog/config.json';
 const NAMED = '/etc/bind/named.conf';

@@ -1,11 +1,11 @@
 <?php
 
-use App\Http\Controllers\Api\V1\DatabaseOperationController;
-use App\Http\Controllers\Api\V1\Usage\ResourceUsageController;
-use App\Http\Controllers\Api\V1\WebLogController;
-use App\Http\Controllers\Api\V1\WebWafController;
-use App\Http\Controllers\Api\V1\WordPressController;
 use Illuminate\Support\Facades\Route;
+use IspconfigRestHosting\Http\Controllers\DatabaseOperationController;
+use IspconfigRestHosting\Http\Controllers\ResourceUsageController;
+use IspconfigRestHosting\Http\Controllers\WebLogController;
+use IspconfigRestHosting\Http\Controllers\WebWafController;
+use IspconfigRestHosting\Http\Controllers\WordPressController;
 
 /*
 |--------------------------------------------------------------------------

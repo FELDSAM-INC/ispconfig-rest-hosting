@@ -1,8 +1,8 @@
 <?php
 
-namespace Tests\Unit;
+namespace IspconfigRestHosting\Tests\Unit;
 
-use App\Support\DnsCatalog;
+use IspconfigRestHosting\Support\DnsCatalog;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 

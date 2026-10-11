@@ -9,7 +9,7 @@ Install this optional tool on **each ISPConfig webserver**, including slave serv
 ## Install
 
 1. Update the master REST API and run its migrations, including `2026_09_27_000002_create_web_waf_tables.php` and `2026_09_27_000003_add_web_waf_application_profiles.php`, with a database administrator. The runtime API user does not need CREATE/ALTER privileges.
-2. Stage a reviewed release in a **root-owned directory with no group/other-writable ancestors**, for example `/root/ispconfig-rest-release`. Do not execute a web-writable REST checkout as root. Keep the `waf-server` and `app/Support` directories from the same release.
+2. Stage a reviewed release in a **root-owned directory with no group/other-writable ancestors**, for example `/root/ispconfig-rest-release`. Do not execute a web-writable REST checkout as root. Keep the `waf-server` and `src/Support` directories from the same release.
 3. As root on each webserver:
 
 ```sh
@@ -96,11 +96,11 @@ The root worker collects every five seconds during its minute cron slot, caps re
 docker build -t ispcp-waf-test tests/Integration/waf
 docker run --rm -v "$PWD:/app:ro" -w /app ispcp-waf-test bash tests/Integration/waf/check.sh apache
 docker run --rm -v "$PWD:/app:ro" -w /app ispcp-waf-test bash tests/Integration/waf/check.sh nginx
-docker run --rm -v "$PWD:/app:ro" -w /app ispcp-waf-test bash tests/Integration/waf/install.sh apache
-docker run --rm -v "$PWD:/app:ro" -w /app ispcp-waf-test bash tests/Integration/waf/install.sh nginx
+docker run --rm -v "$PWD:/app:ro" -v "$(cd ../.. && pwd):/core:ro" -e ISPCONFIG_REST_DIR=/core -w /app ispcp-waf-test bash tests/Integration/waf/install.sh apache
+docker run --rm -v "$PWD:/app:ro" -v "$(cd ../.. && pwd):/core:ro" -e ISPCONFIG_REST_DIR=/core -w /app ispcp-waf-test bash tests/Integration/waf/install.sh nginx
 # Ubuntu 24.04 instead of Debian 13:
 docker build -t ispcp-waf-test-noble --build-arg BASE=ubuntu:24.04 --build-arg PHP=php8.3 tests/Integration/waf
-php vendor/bin/phpunit --filter WebWaf
+../../vendor/bin/phpunit --filter WebWaf
 ```
 
 The native-engine checks run **only inside disposable containers** (they stub systemctl). They exercise detection/enforcing, scoped path/argument exceptions, IP bypass, disabled mode, audit normalization and cursor privacy. They also verify profile discovery and reject writable, foreign-owned, symlinked or incompatible rule files. WordPress Gutenberg content passes only with its profile, while other paths, arguments and another website remain protected, even if a global CRS setup flag tries to enable WordPress everywhere. All six profile configurations and switching back to None are tested on Apache and nginx. The checks download and verify the pinned upstream OWASP CRS (network access required); the installer checks also cover re-runs that keep local settings and replace a modified CRS copy. They do not use a paid Atomicorp feed.

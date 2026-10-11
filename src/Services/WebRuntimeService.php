@@ -1,12 +1,12 @@
 <?php
 
-namespace App\Services;
+namespace IspconfigRestHosting\Services;
 
 use App\Models\WebDomain;
-use App\Support\WebRuntimeDirectory;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
+use IspconfigRestHosting\Support\WebRuntimeDirectory;
 use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
 
 /** Structured website settings compiled into a bounded, replaceable part of ISPConfig's native directives. */

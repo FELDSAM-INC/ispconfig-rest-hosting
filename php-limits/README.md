@@ -37,7 +37,7 @@ on the master; it reads no native ISPConfig table and never writes one.
 ## Manual installation
 
 Stage a reviewed release in a root-owned directory with no group/other-writable
-ancestors, keeping `php-limits/` and `app/Support/PhpLimits.php` together:
+ancestors, keeping `php-limits/` and `src/Support/PhpLimits.php` together:
 
 ```sh
 bash /root/ispconfig-rest-release/php-limits/install.sh            # restarts PHP-FPM once
@@ -111,7 +111,7 @@ files, and restarts each managed PHP-FPM service with its distribution configura
 ## Verification
 
 ```sh
-php vendor/bin/phpunit --filter 'PhpLimitsTest|ClientResourceLimitsTest|ResourceUsageApiTest'
+../../vendor/bin/phpunit --filter 'PhpLimitsTest|ClientResourceLimitsTest|ResourceUsageApiTest'
 ```
 
 Live behaviour (systemd, cgroups, ISPConfig reloads) is verified on a development

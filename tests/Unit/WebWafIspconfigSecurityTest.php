@@ -1,9 +1,9 @@
 <?php
 
-namespace Tests\Unit;
+namespace IspconfigRestHosting\Tests\Unit;
 
-use App\Support\WebWafIspconfigSecurity;
-use App\Support\WebWafPolicy;
+use IspconfigRestHosting\Support\WebWafIspconfigSecurity;
+use IspconfigRestHosting\Support\WebWafPolicy;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;

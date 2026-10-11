@@ -110,7 +110,7 @@ the secondaries first, or they delete every member zone when the catalog disappe
 ## Tests
 
 ```sh
-php vendor/bin/phpunit --filter DnsCatalog
+../../vendor/bin/phpunit --filter DnsCatalog
 bash tests/Integration/dns-catalog/run.sh   # disposable BIND 9.18 primary + secondary + Ansible controller (Docker);
                                             # clones ispconfig-ansible for the playbook (ANSIBLE_DIR: local checkout)
 ```

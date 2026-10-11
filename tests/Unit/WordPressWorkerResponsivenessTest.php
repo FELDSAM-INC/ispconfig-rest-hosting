@@ -1,8 +1,8 @@
 <?php
 
-namespace Tests\Unit;
+namespace IspconfigRestHosting\Tests\Unit;
 
-use App\Support\WordPressPolicy;
+use IspconfigRestHosting\Support\WordPressPolicy;
 use PDO;
 use PDOException;
 use PDOStatement;

@@ -1,8 +1,8 @@
 <?php
 
-require '/app/vendor/autoload.php';
-use App\Support\WebWafIspconfigSecurity;
-use Tests\Unit\WebWafIspconfigSecurityTest;
+require '/app/tests/bootstrap.php';
+use IspconfigRestHosting\Support\WebWafIspconfigSecurity;
+use IspconfigRestHosting\Tests\Unit\WebWafIspconfigSecurityTest;
 
 $dir = '/usr/local/ispconfig/security';
 $target = $dir.'/apache_directives.blacklist.custom';

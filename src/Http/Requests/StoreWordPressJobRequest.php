@@ -1,13 +1,14 @@
 <?php
 
-namespace App\Http\Requests;
+namespace IspconfigRestHosting\Http\Requests;
 
+use App\Http\Requests\SitesRequest;
 use App\Models\WebDomain;
-use App\Services\WordPressCronService;
 use App\Support\IspContext;
-use App\Support\WordPressPolicy;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
+use IspconfigRestHosting\Services\WordPressCronService;
+use IspconfigRestHosting\Support\WordPressPolicy;
 
 final class StoreWordPressJobRequest extends SitesRequest
 {

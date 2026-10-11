@@ -1,0 +1,8 @@
+# Database fields of the hosting extension.
+# Merged into ispconfig-rest's components/schemas/Database.yaml when it is served (spec 058).
+properties:
+  operations:
+    type: array
+    readOnly: true
+    description: Available operations on this active MySQL database; empty without a recent server worker heartbeat.
+    items: {type: string, enum: [import, export, copy]}

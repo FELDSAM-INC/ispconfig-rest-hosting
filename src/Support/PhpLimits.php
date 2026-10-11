@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Support;
+namespace IspconfigRestHosting\Support;
 
 /**
  * Pure planning and rendering for the php-limits worker (spec 053). No I/O:

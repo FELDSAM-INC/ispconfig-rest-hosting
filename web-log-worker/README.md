@@ -17,7 +17,7 @@ on **each web server**, independently of the database operations worker:
 sudo sh web-log-worker/install.sh
 ```
 
-Copy this directory and `app/Support/WebLogReader.php`, `WebRuntimeDirectory.php`
+Copy this directory and `src/Support/WebLogReader.php`, `WebRuntimeDirectory.php`
 and `WebPhpDefaults.php` preserving their relative
 layout, or run the installer from a trusted API checkout. It installs root-owned
 copies and a cron entry. Re-run to upgrade; never execute a web-writable checkout

@@ -1,10 +1,10 @@
 <?php
 
-namespace Tests\Feature;
+namespace IspconfigRestHosting\Tests\Feature;
 
-use App\Services\ClientWebPhpPolicyService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use IspconfigRestHosting\Services\ClientWebPhpPolicyService;
 use Tests\Support\ClientApiTestCase;
 use Tests\Support\SitesSchema;
 use Tests\Support\SystemSchema;

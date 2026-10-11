@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Providers;
+namespace IspconfigRestHosting;
 
 use App\Extensions\Hooks;
 use App\Models\Client;
@@ -8,22 +8,23 @@ use App\Models\CronJob;
 use App\Models\WebDatabase;
 use App\Models\WebDatabaseUser;
 use App\Models\WebDomain;
-use App\Services\ClientResourceLimitsService;
-use App\Services\ClientWebPhpPolicyService;
-use App\Services\DatabaseOperationService;
-use App\Services\WebLogService;
-use App\Services\WebPhpSettingsService;
-use App\Services\WebRuntimeService;
-use App\Services\WebWafService;
-use App\Services\WordPressCronService;
-use App\Services\WordPressService;
-use App\Support\CronOutputLog;
 use App\Support\IspContext;
 use Illuminate\Foundation\Http\Middleware\TrimStrings;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\ServiceProvider;
+use IspconfigRestHosting\Console\ServerToolsInventory;
+use IspconfigRestHosting\Services\ClientResourceLimitsService;
+use IspconfigRestHosting\Services\ClientWebPhpPolicyService;
+use IspconfigRestHosting\Services\DatabaseOperationService;
+use IspconfigRestHosting\Services\WebLogService;
+use IspconfigRestHosting\Services\WebPhpSettingsService;
+use IspconfigRestHosting\Services\WebRuntimeService;
+use IspconfigRestHosting\Services\WebWafService;
+use IspconfigRestHosting\Services\WordPressCronService;
+use IspconfigRestHosting\Services\WordPressService;
+use IspconfigRestHosting\Support\CronOutputLog;
 use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
 use WeakMap;
 
@@ -45,6 +46,7 @@ class HostingServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->beforePolicy = new WeakMap;
+        $this->mergeConfigFrom(__DIR__.'/../config/web_logs.php', 'web_logs');
 
         foreach ([DatabaseOperationService::class, WebLogService::class, WebWafService::class, WordPressService::class] as $service) {
             $this->app->scoped($service);
@@ -56,7 +58,12 @@ class HostingServiceProvider extends ServiceProvider
     {
         // Environment values are kept exactly as sent.
         TrimStrings::except(['runtime_settings.environment.*']);
-        $this->loadRoutesFrom(base_path('routes/hosting.php'));
+        $this->loadRoutesFrom(__DIR__.'/../routes/api.php');
+        // Same file names as when they shipped with ispconfig-rest, so existing installations do not run them again.
+        $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
+        if ($this->app->runningInConsole()) {
+            $this->commands([ServerToolsInventory::class]);
+        }
 
         $this->websites($hooks);
         $this->scheduledTasks($hooks);

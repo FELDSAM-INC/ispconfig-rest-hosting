@@ -1,17 +1,17 @@
 <?php
 
-namespace App\Http\Controllers\Api\V1;
+namespace IspconfigRestHosting\Http\Controllers;
 
 use App\Http\Controllers\Controller;
-use App\Http\Requests\UpdateWebWafRequest;
 use App\Models\WebDomain;
-use App\Services\WebWafService;
 use App\Support\IspContext;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use IspconfigRestHosting\Http\Requests\UpdateWebWafRequest;
+use IspconfigRestHosting\Services\WebWafService;
 
 final class WebWafController extends Controller
 {

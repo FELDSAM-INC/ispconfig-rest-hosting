@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Support;
+namespace IspconfigRestHosting\Support;
 
 /**
  * Application profiles backed by the official OWASP CRS 4 rule exclusion plugins pinned in waf-server/crs.json. Every

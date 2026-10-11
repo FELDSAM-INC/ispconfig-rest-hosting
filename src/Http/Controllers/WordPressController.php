@@ -1,12 +1,12 @@
 <?php
 
-namespace App\Http\Controllers\Api\V1;
+namespace IspconfigRestHosting\Http\Controllers;
 
 use App\Http\Controllers\Controller;
-use App\Http\Requests\StoreWordPressJobRequest;
 use App\Models\WebDomain;
-use App\Services\WordPressService;
 use Illuminate\Http\JsonResponse;
+use IspconfigRestHosting\Http\Requests\StoreWordPressJobRequest;
+use IspconfigRestHosting\Services\WordPressService;
 
 final class WordPressController extends Controller
 {

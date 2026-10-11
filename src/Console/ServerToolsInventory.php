@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Console\Commands;
+namespace IspconfigRestHosting\Console;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
