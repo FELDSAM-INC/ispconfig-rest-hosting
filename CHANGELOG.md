@@ -5,6 +5,11 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-11
+
+First release as an extension, for ispconfig-rest 1.1. Install it with `sudo ispconfig-rest extension:install hosting`
+right after updating ispconfig-rest; see the [README](README.md#upgrade-from-ispconfig-rest-10x).
+
 ### Added
 
 - The hosting features of ispconfig-rest up to 1.0.7 as an extension for ispconfig-rest 1.1 (spec 058 of
