@@ -5,6 +5,15 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-10-17
+
+### Fixed
+
+- `dns-catalog`: when ISPConfig processed several zone changes in one run (for example two deleted zones), only the first
+  reached the catalog at once and the others waited for the five-minute timer. ISPConfig rewrites `named.conf.local`
+  for each change, and a rewrite while the sync runs does not start its path unit again. The sync now repeats until the
+  file stays as it was read (it waits two seconds for further rewrites).
+
 ## [1.1.2] - 2026-10-17
 
 ### Fixed
