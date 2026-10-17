@@ -5,6 +5,16 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-17
+
+### Fixed
+
+- Installing the `file-manager` server tool on a webserver without bubblewrap (Ubuntu 26.04) also installed
+  `default-mysql-client`, which on Ubuntu is MySQL's client and made apt remove the server's MariaDB. The installer now
+  adds only what is missing, uses the MariaDB client where MariaDB is installed, and the worker installers let apt
+  abort instead of removing any package (`--no-remove`). To repair a server it happened to, reinstall MariaDB:
+  `apt-get install mariadb-server mariadb-client` (its data and configuration were kept).
+
 ## [1.0.0] - 2026-10-11
 
 First release as an extension, for ispconfig-rest 1.1. Install it with `sudo ispconfig-rest extension:install hosting`

@@ -3,10 +3,22 @@ set -eu
 [ "$(id -u)" = 0 ] || exit 1
 worker_source=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # Debian/Ubuntu ISPConfig webservers. No fallback to unjailed PHP execution.
-if ! command -v bwrap >/dev/null || ! command -v mysql >/dev/null || ! command -v mysqldump >/dev/null; then
+# Only what is missing. The client follows the server: default-mysql-client is MySQL's on Ubuntu, which replaces an
+# installed MariaDB, and --no-remove makes apt stop instead of removing anything.
+packages=""
+command -v bwrap >/dev/null || packages="bubblewrap"
+if ! command -v mysql >/dev/null || ! command -v mysqldump >/dev/null; then
+    if dpkg-query -W -f '${Status}' mariadb-common 2>/dev/null | grep -q 'ok installed'; then
+        packages="$packages mariadb-client"
+    else
+        packages="$packages default-mysql-client"
+    fi
+fi
+if [ -n "$packages" ]; then
     command -v apt-get >/dev/null || { echo 'WordPress requires bubblewrap 0.9+, PHP CLI and MySQL client tools.' >&2; exit 1; }
     apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bubblewrap default-mysql-client ca-certificates
+    # shellcheck disable=SC2086
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove $packages ca-certificates
 fi
 bwrap --help | grep -q -- --bind-fd || { echo 'WordPress requires bubblewrap with --bind-fd and --disable-userns.' >&2; exit 1; }
 bwrap --help | grep -q -- --disable-userns || exit 1
