@@ -58,3 +58,10 @@ for _ in $(seq 1 30); do served a.test || break; sleep 1; done
 if served a.test; then echo 'secondary still serves a.test'; exit 1; fi
 served c.test
 echo 'PASS a removed or disabled zone is removed from the secondary'
+# ISPConfig processes several zone changes in one run and rewrites named.conf.local for each: a rewrite during a sync
+# (whose path unit does not start again) is picked up before the sync ends.
+docker exec ispcp-catalog-primary sh -c 'ispconfig-dns-catalog sync >/dev/null & sleep 1; sed -i "/c\.test/,/^};/d" /etc/bind/named.conf.local && rndc reconfig >/dev/null; wait'
+docker exec ispcp-catalog-primary sh -c 'ispconfig-dns-catalog sync | grep -q unchanged' || { echo 'a rewrite during the sync was missed'; exit 1; }
+for _ in $(seq 1 30); do served c.test || break; sleep 1; done
+if served c.test; then echo 'secondary still serves c.test'; exit 1; fi
+echo 'PASS a zone change during a sync reaches the catalog before the sync ends'

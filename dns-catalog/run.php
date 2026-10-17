@@ -15,6 +15,9 @@ require is_file(__DIR__.'/DnsCatalog.php') ? __DIR__.'/DnsCatalog.php' : __DIR__
 const CONFIG = '/etc/ispconfig-dns-catalog/config.json';
 const NAMED = '/etc/bind/named.conf';
 const LOCAL = '/etc/bind/named.conf.local';
+/** A sync waits this long for further rewrites of named.conf.local and repeats at most MAX_PASSES times. */
+const SETTLE_SECONDS = 2;
+const MAX_PASSES = 10;
 const OPTIONS = '/etc/bind/named.conf.options';
 // ISPConfig rewrites named.conf.options from this template when an update reconfigures services.
 const CUSTOM = '/usr/local/ispconfig/server/conf-custom/install/named.conf.options.master';
@@ -222,7 +225,18 @@ try {
         echo 'Catalog zone '.$settings['catalog'].' is served. Transfers need the TSIG key '.$settings['key'].".\n";
         echo "Set up a secondary with dns-catalog/README.md; ispconfig-dns-catalog export prints the key.\n";
     } elseif ($action === 'sync') {
-        echo sync(settings());
+        // ISPConfig rewrites named.conf.local once for every zone change it processes, often several in one cron run. A
+        // rewrite while this sync runs does not start the path unit again, so the sync repeats until the file stays as
+        // it was read.
+        $settings = settings();
+        for ($pass = 1; ; $pass++) {
+            $read = (string) hash_file('sha256', LOCAL);
+            echo sync($settings);
+            sleep(SETTLE_SECONDS);
+            if ($pass === MAX_PASSES || (string) hash_file('sha256', LOCAL) === $read) {
+                break;
+            }
+        }
     } elseif ($action === 'status') {
         $settings = settings();
         [, $local] = command(['named-checkconf', '-p', LOCAL]);
