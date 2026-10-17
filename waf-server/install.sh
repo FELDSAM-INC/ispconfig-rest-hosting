@@ -41,12 +41,12 @@ fi
 apt-get update
 # OWASP CRS comes from the upstream release pinned in crs.json, not from the older distribution package.
 if [[ "$engine" = apache ]]; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libapache2-mod-security2 curl gpgv ca-certificates
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove libapache2-mod-security2 curl gpgv ca-certificates
     engine_packages=(libapache2-mod-security2)
     engine_minimum=2.9.6
 else
     # Distribution packages ensure the connector matches the installed nginx ABI.
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libnginx-mod-http-modsecurity curl gpgv ca-certificates
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove libnginx-mod-http-modsecurity curl gpgv ca-certificates
     engine_packages=(libmodsecurity3 libmodsecurity3t64)
     engine_minimum=3.0.8
 fi
