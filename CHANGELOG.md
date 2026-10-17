@@ -5,6 +5,16 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-17
+
+### Fixed
+
+- `php-limits` manages an FPM service of `Type=simple`, such as PHP 5.3 built by the Ansible roles, which has no
+  systemd support: its dedicated pools run as simple services too. They were written as `notify` units, which wait for
+  a readiness message that PHP 5.3 never sends. Packaged versions keep `notify`. (PHP 5.3 also needs ispconfig-ansible
+  to install its FPM as `/usr/sbin/php-fpm5.3`, the packaged layout; until then it is reported as
+  `unmanaged (exec_start_changed)`.)
+
 ## [1.1.0] - 2026-10-17
 
 ### Changed
