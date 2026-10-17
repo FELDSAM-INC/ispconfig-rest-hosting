@@ -5,6 +5,17 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-10-17
+
+### Fixed
+
+- `server-tools update` (and `status`) without `--components` covered only the default install selection, so it never
+  updated `php-limits` or `dns-catalog` on the servers that have them, as documented. They now default to every
+  component, and `update` still acts only on what each server has installed. To get the `php-limits` fix of 1.1.1 onto
+  a server: `sudo ispconfig-rest server-tools update`.
+- `php-limits` no longer writes `CPUAccounting=` into its units. systemd 258 and later (Ubuntu 26.04) removed the option
+  and logged a warning at every start; cgroup v2 counts CPU time without it and `CPUQuota=` enables the CPU controller.
+
 ## [1.1.1] - 2026-10-17
 
 ### Fixed
