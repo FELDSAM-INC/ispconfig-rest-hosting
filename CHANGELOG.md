@@ -5,6 +5,14 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-10-17
+
+### Changed
+
+- Works with every ispconfig-rest 1.x from 1.1.0 (`requires` is now `>=1.1.0 <2.0.0`), so a new minor release of the
+  core such as 1.2.0 keeps loading the extension without waiting for a release of it. A core 2.0 needs an extension
+  release that declares it.
+
 ## [1.0.1] - 2026-10-17
 
 ### Fixed

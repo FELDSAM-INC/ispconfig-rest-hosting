@@ -18,15 +18,15 @@ OpenAPI document at `/api/documentation` includes them while the extension is in
 
 ## Install
 
-On the REST host, with ispconfig-rest 1.1 installed:
+On the REST host, with ispconfig-rest 1.1 or a later 1.x installed:
 
 ```sh
 sudo ispconfig-rest extension:install hosting                 # follows main
-sudo ispconfig-rest extension:install hosting --tag v1.0.0    # or a pinned release
+sudo ispconfig-rest extension:install hosting --tag v1.0.2    # or a pinned release
 sudo ispconfig-rest server-tools install --help               # workers on the ISPConfig servers
 ```
 
-New installations can add `--extension hosting` (or `hosting@v1.0.0`) to ispconfig-rest's `install.sh`.
+New installations can add `--extension hosting` (or `hosting@v1.0.2`) to ispconfig-rest's `install.sh`.
 `ispconfig-rest update` also updates the extension on its own channel (branch or pinned release);
 `ispconfig-rest extension:update hosting [--branch NAME | --tag VERSION]` changes or updates it alone.
 `ispconfig-rest extension:list` shows whether it is loaded. A release states the ispconfig-rest versions it supports

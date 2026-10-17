@@ -1,9 +1,9 @@
 {
     "name": "hosting",
     "description": "Hosting features for ispconfig-rest: database operations, website logs and runtime settings, file manager and WordPress tools, WAF, product PHP policies and PHP-FPM limits, DNS catalog zones, server tools.",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "requires": {
-        "ispconfig-rest": ">=1.1.0 <1.2.0"
+        "ispconfig-rest": ">=1.1.0 <2.0.0"
     },
     "autoload": {
         "psr-4": {
