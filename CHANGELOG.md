@@ -5,6 +5,16 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-17
+
+### Changed
+
+- The file manager accepts every outgoing address of WHMCS: `--whmcs-ip` takes up to four IPv4 and IPv6 addresses,
+  comma separated, and the WHMCS key is restricted to all of them. A WHMCS host with both IPv4 and IPv6 connects to a
+  dual-stack webserver over IPv6, so with only its IPv4 address the file manager's login was refused and the file
+  manager stayed unavailable. To add an address, rerun `server-tools install --components file-manager` with
+  `--file-manager-key` and the full `--whmcs-ip` list; installations with one address keep working.
+
 ## [1.0.2] - 2026-10-17
 
 ### Changed
