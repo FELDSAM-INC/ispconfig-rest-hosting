@@ -231,6 +231,13 @@ def package_release(args, directory, run_as):
     return archive
 
 
+def requested_components(args):
+    """The components of the command: as given, or by default all but php-limits and dns-catalog for install and every
+    component for update and status, which act only on what each server has installed."""
+    value = args.components if args.components is not None else ",".join(DEFAULT_COMPONENTS if args.action == "install" else COMPONENTS)
+    return list(dict.fromkeys(value.split(",")))
+
+
 def whmcs_addresses(value):
     """The WHMCS egress addresses as one comma-separated list: a dual-stack WHMCS host reaches the servers over IPv6
     or IPv4, and the file-manager key accepts only the addresses listed."""
@@ -247,7 +254,7 @@ def whmcs_addresses(value):
 def parser():
     result = argparse.ArgumentParser(description="Install/update ISPConfig REST workers and WAF across ISPConfig servers.")
     result.add_argument("action", choices=("install", "update", "status"))
-    result.add_argument("--components", default=",".join(DEFAULT_COMPONENTS), help="Comma-separated database,web-logs,file-manager,waf,php-limits,dns-catalog (default: all except php-limits and dns-catalog)")
+    result.add_argument("--components", help="Comma-separated database,web-logs,file-manager,waf,php-limits,dns-catalog (install default: all except php-limits and dns-catalog; update and status: every installed one)")
     result.add_argument("--server", type=int, action="append", default=[], help="Only this server ID (repeatable)")
     result.add_argument("--host", action="append", default=[], metavar="ID=HOST", help="Override SSH address/alias for a server")
     result.add_argument("--ssh-user", default="root", help="SSH user; non-root requires passwordless sudo")
@@ -268,7 +275,7 @@ def main(argv=None):
     if os.geteuid() != 0:
         raise Failure("Run as root (sudo ispconfig-rest server-tools install).")
     os.umask(0o077)
-    requested = list(dict.fromkeys(args.components.split(",")))
+    requested = requested_components(args)
     if not requested or any(item not in COMPONENTS for item in requested):
         raise Failure("Unknown --components value.")
     if not re.fullmatch(r"[a-z_][a-z0-9_-]*[$]?", args.ssh_user) or (args.ssh_port is not None and not 1 <= args.ssh_port <= 65535):
