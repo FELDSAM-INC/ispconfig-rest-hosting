@@ -229,7 +229,9 @@ final class PhpLimits
     /** @param  array{cpu_percent: int|null, memory_mb: int|null, tasks: int|null}|null  $limits */
     private static function limitLines(?array $limits): array
     {
-        $lines = ['CPUAccounting=yes', 'MemoryAccounting=yes', 'TasksAccounting=yes'];
+        // No CPUAccounting=: cgroup v2 always counts CPU time (cpu.stat usage_usec), CPUQuota= enables the controller,
+        // and systemd 258+ (Ubuntu 26.04) removed the option and warns about it at every start.
+        $lines = ['MemoryAccounting=yes', 'TasksAccounting=yes'];
         $memory = $limits['memory_mb'] ?? null;
         $cpu = $limits['cpu_percent'] ?? null;
         $tasks = $limits['tasks'] ?? null;

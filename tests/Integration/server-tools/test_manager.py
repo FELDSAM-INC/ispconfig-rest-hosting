@@ -29,7 +29,11 @@ class ManagerTests(unittest.TestCase):
         row = self.row()
         self.assertEqual(["web-logs", "file-manager", "waf", "php-limits"], manager.components_for(row, manager.COMPONENTS))
         self.assertEqual(["web-logs", "file-manager", "waf"], manager.components_for(row, manager.DEFAULT_COMPONENTS))
-        self.assertEqual("database,web-logs,file-manager,waf", self.args().components)
+        self.assertEqual(["database", "web-logs", "file-manager", "waf"], manager.requested_components(self.args()))
+        # An update or status covers every installed component, php-limits and dns-catalog included
+        for action in ("update", "status"):
+            self.assertEqual(list(manager.COMPONENTS), manager.requested_components(manager.parser().parse_args([action])))
+        self.assertEqual(["php-limits"], manager.requested_components(manager.parser().parse_args(["update", "--components", "php-limits"])))
         row.update(web=False, database=True)
         self.assertEqual(["database"], manager.components_for(row, manager.COMPONENTS))
         # The DNS catalog only on DNS servers, and only when selected

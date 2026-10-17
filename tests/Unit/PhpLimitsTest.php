@@ -129,10 +129,12 @@ class PhpLimitsTest extends TestCase
         $policy = ['account' => ['cpu_percent' => 200, 'memory_mb' => 2048, 'tasks' => 256], 'website' => ['cpu_percent' => null, 'memory_mb' => 512, 'tasks' => null]];
         $slice = PhpLimits::sliceUnit(59, $policy);
         $this->assertStringStartsWith(PhpLimits::MARKER."\n", $slice);
-        foreach (['MemoryMax=2048M', 'MemorySwapMax=0', 'CPUQuota=200%', 'TasksMax=256', 'CPUAccounting=yes'] as $line) {
+        foreach (['MemoryMax=2048M', 'MemorySwapMax=0', 'CPUQuota=200%', 'TasksMax=256', 'MemoryAccounting=yes'] as $line) {
             $this->assertStringContainsString($line."\n", $slice);
         }
         $this->assertStringNotContainsString('MemoryHigh', $slice);
+        $this->assertStringNotContainsString('CPUAccounting', $slice, 'systemd 258+ removed it; cgroup v2 always counts CPU time');
+        $this->assertStringNotContainsString('CPUAccounting', PhpLimits::poolUnit($this->service(), 'web34', 59, $policy));
 
         $unit = PhpLimits::poolUnit($this->service(), 'web34', 59, $policy);
         foreach (['Slice=ispconfig-client59.slice', 'OOMPolicy=continue', 'Type=notify', 'MemoryMax=512M', 'MemorySwapMax=0', 'TasksMax=infinity',
