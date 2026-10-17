@@ -51,8 +51,9 @@ service was restarted by the administrator (reported as `service_restart_require
 ## How it works
 
 Only distribution units whose `ExecStart` is exactly
-`/usr/sbin/php-fpmX.Y --nodaemonize --fpm-config /etc/php/X.Y/fpm/php-fpm.conf` and
-whose configuration includes `pool.d/*.conf` are managed. For each, a drop-in
+`/usr/sbin/php-fpmX.Y --nodaemonize --fpm-config /etc/php/X.Y/fpm/php-fpm.conf`, whose `Type` is `notify` (the
+packaged versions) or `simple` (an FPM without systemd support, such as the PHP 5.3 the Ansible roles build), and
+whose configuration includes `pool.d/*.conf` are managed. Dedicated pools run with the master's `Type`. For each, a drop-in
 (`/etc/systemd/system/phpX.Y-fpm.service.d/50-ispconfig-rest-php-limits.conf`) starts
 the master with a generated copy of the distribution configuration,
 `/etc/ispconfig-rest-php-limits/phpX.Y-fpm.conf`, whose pool glob is replaced by one

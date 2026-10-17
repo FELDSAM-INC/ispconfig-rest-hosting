@@ -50,10 +50,29 @@ class PhpLimitsTest extends TestCase
     public function test_only_the_packaged_master_command_is_managed(): void
     {
         $this->assertSame(['unit' => 'php8.3-fpm', 'version' => '8.3', 'binary' => '/usr/sbin/php-fpm8.3',
-            'conf' => '/etc/php/8.3/fpm/php-fpm.conf', 'pool_dir' => '/etc/php/8.3/fpm/pool.d'], $this->service());
+            'conf' => '/etc/php/8.3/fpm/php-fpm.conf', 'pool_dir' => '/etc/php/8.3/fpm/pool.d', 'type' => 'notify'], $this->service());
         $this->assertNull(PhpLimits::service('8.3', str_replace('--nodaemonize', '--nodaemonize -R', self::UNIT)));
+        $this->assertNull(PhpLimits::service('8.3', str_replace('Type=notify', 'Type=forking', self::UNIT)), 'a forking master is not one php-limits starts');
         $this->assertNull(PhpLimits::service('8.3', self::UNIT."\nExecStart=/usr/sbin/php-fpm8.3 -y /tmp/x"));
         $this->assertNull(PhpLimits::service('8.3; rm', self::UNIT));
+    }
+
+    /**
+     * An FPM without systemd support (PHP 5.3, built from source by the Ansible roles) runs as a simple service, and so
+     * do its dedicated pools: a notify unit would wait for a readiness message that never comes.
+     */
+    public function test_a_simple_master_gets_simple_pool_units(): void
+    {
+        $unit = "[Service]\nType=simple\nExecStartPre=/usr/sbin/php-fpm5.3 --test --fpm-config /etc/php/5.3/fpm/php-fpm.conf\n"
+            ."ExecStart=/usr/sbin/php-fpm5.3 --nodaemonize --fpm-config /etc/php/5.3/fpm/php-fpm.conf\n";
+        $service = PhpLimits::service('5.3', $unit);
+
+        $this->assertSame('simple', $service['type']);
+        $this->assertSame('simple', PhpLimits::service('5.3', str_replace("Type=simple\n", '', $unit))['type'], 'the systemd default');
+        $pool = PhpLimits::poolUnit($service, 'web7', 5, ['revision' => 1, 'website' => null]);
+        $this->assertStringContainsString("\nType=simple\n", $pool);
+        $this->assertStringNotContainsString('Type=notify', $pool);
+        $this->assertStringContainsString('ExecStart=/usr/sbin/php-fpm5.3 --nodaemonize --fpm-config ', $pool);
     }
 
     public function test_ispconfig_pools_map_to_their_account(): void

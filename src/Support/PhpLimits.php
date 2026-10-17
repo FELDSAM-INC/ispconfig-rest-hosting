@@ -80,17 +80,21 @@ final class PhpLimits
         $binary = '/usr/sbin/php-fpm'.$version;
         $conf = '/etc/php/'.$version.'/fpm/php-fpm.conf';
         $exec = [];
+        // systemd's default; the packaged units notify, an FPM without systemd support (PHP 5.3) is simple
+        $type = 'simple';
         foreach (preg_split('/\R/', $unitFile) as $line) {
             if (preg_match('/\A\s*ExecStart\s*=\s*(.*?)\s*\z/D', $line, $match)) {
                 $exec[] = $match[1];
+            } elseif (preg_match('/\A\s*Type\s*=\s*(.*?)\s*\z/D', $line, $match)) {
+                $type = $match[1];
             }
         }
-        if ($exec !== [$binary.' --nodaemonize --fpm-config '.$conf]) {
+        if ($exec !== [$binary.' --nodaemonize --fpm-config '.$conf] || ! in_array($type, ['notify', 'simple'], true)) {
             return null;
         }
 
         return ['unit' => 'php'.$version.'-fpm', 'version' => $version, 'binary' => $binary, 'conf' => $conf,
-            'pool_dir' => '/etc/php/'.$version.'/fpm/pool.d'];
+            'pool_dir' => '/etc/php/'.$version.'/fpm/pool.d', 'type' => $type];
     }
 
     /**
@@ -260,7 +264,7 @@ final class PhpLimits
         return self::MARKER."\n[Unit]\n"
             .'Description=PHP '.$service['version'].' FPM pool '.$pool.' (ISPConfig client '.$clientId.")\n"
             ."PartOf=$unit\nAfter=$unit network.target\nStartLimitIntervalSec=60\nStartLimitBurst=5\n\n[Service]\n"
-            ."Type=notify\nSlice=".self::sliceName($clientId)."\n"
+            .'Type='.($service['type'] ?? 'notify')."\nSlice=".self::sliceName($clientId)."\n"
             .'ExecStartPre='.self::CLI.' wait-socket '.$pool."\n"
             .'ExecStart='.$service['binary'].' --nodaemonize --fpm-config '.self::poolConfPath($pool)."\n"
             ."ExecReload=/bin/kill -USR2 \$MAINPID\nRestart=on-failure\nRestartSec=2\n"
