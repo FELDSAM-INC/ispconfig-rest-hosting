@@ -3,16 +3,17 @@ set -eu
 [ "$(id -u)" = 0 ] || { echo 'Run as root.' >&2; exit 1; }
 defer_reconcile=0
 if [ "${1:-}" = --no-run ]; then defer_reconcile=1; shift; fi
-[ "$#" = 2 ] || { echo 'Usage: install.sh [--no-run] /path/to/whmcs-file-manager.pub WHMCS_EGRESS_IP' >&2; exit 1; }
+[ "$#" = 2 ] || { echo 'Usage: install.sh [--no-run] /path/to/whmcs-file-manager.pub WHMCS_EGRESS_IP[,WHMCS_EGRESS_IP...]' >&2; exit 1; }
 [ -f /usr/local/ispconfig/server/lib/config.inc.php ] || { echo 'Install on an ISPConfig webserver.' >&2; exit 1; }
 worker_source=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-python3 -c 'import ipaddress,sys; ipaddress.ip_address(sys.argv[1])' "$2"
+# IPv4 and/or IPv6, comma separated: a dual-stack WHMCS host reaches the server over either
+python3 -c 'import ipaddress,sys; addresses = sys.argv[1].split(","); assert 0 < len(addresses) <= 4; [ipaddress.ip_address(a) for a in addresses]' "$2"
 ssh-keygen -l -f "$1" >/dev/null
 install -d -m 0755 /var/lib/ispcp-files /var/lib/ispcp-files/jails /etc/ispcp-files /etc/ispcp-files/keys
 install -d -m 0700 -o root -g root /usr/local/lib/ispconfig-rest-file-manager-worker
 install -m 0600 -o root -g root "$worker_source/reconcile.py" "$worker_source/sites.php" /usr/local/lib/ispconfig-rest-file-manager-worker/
 install -m 0600 "$1" /etc/ispcp-files/client.pub
-python3 -c 'import json,sys; open("/etc/ispcp-files/config.json","w").write(json.dumps({"whmcs_ip":sys.argv[1]}))' "$2"
+python3 -c 'import ipaddress,json,sys; open("/etc/ispcp-files/config.json","w").write(json.dumps({"whmcs_ips":[str(ipaddress.ip_address(a)) for a in sys.argv[1].split(",")]}))' "$2"
 chmod 0600 /etc/ispcp-files/config.json
 getent group ispcp-files >/dev/null || groupadd --system ispcp-files
 previous_include=$(mktemp)

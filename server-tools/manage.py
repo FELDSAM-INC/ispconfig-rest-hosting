@@ -231,6 +231,19 @@ def package_release(args, directory, run_as):
     return archive
 
 
+def whmcs_addresses(value):
+    """The WHMCS egress addresses as one comma-separated list: a dual-stack WHMCS host reaches the servers over IPv6
+    or IPv4, and the file-manager key accepts only the addresses listed."""
+    message = "--whmcs-ip must be up to four IPv4 or IPv6 addresses separated by commas."
+    try:
+        addresses = [str(ipaddress.ip_address(part.strip())) for part in value.split(",") if part.strip()]
+    except ValueError as error:
+        raise Failure(message) from error
+    if not addresses or len(addresses) > 4:
+        raise Failure(message)
+    return ",".join(dict.fromkeys(addresses))
+
+
 def parser():
     result = argparse.ArgumentParser(description="Install/update ISPConfig REST workers and WAF across ISPConfig servers.")
     result.add_argument("action", choices=("install", "update", "status"))
@@ -243,7 +256,7 @@ def parser():
     result.add_argument("--known-hosts", type=Path)
     result.add_argument("--source", type=Path, help="Reviewed root-owned release instead of fetching the installed commit from GitHub")
     result.add_argument("--file-manager-key", type=Path, help="WHMCS PUBLIC SSH key, required for first file-manager installation")
-    result.add_argument("--whmcs-ip", help="WHMCS egress IPv4/IPv6 for the file-manager key restriction")
+    result.add_argument("--whmcs-ip", help="WHMCS egress addresses for the file-manager key restriction: IPv4 and/or IPv6, comma separated")
     result.add_argument("--dry-run", action="store_true", help="Discover and check SSH/requirements without installing or granting privileges")
     result.add_argument("--yes", action="store_true", help="Apply the displayed plan without an interactive confirmation")
     result.add_argument("--no-grants", action="store_true", help="Require all worker table privileges to be configured already")
@@ -263,10 +276,7 @@ def main(argv=None):
     if bool(args.file_manager_key) != bool(args.whmcs_ip):
         raise Failure("Supply both --file-manager-key and --whmcs-ip.")
     if args.whmcs_ip:
-        try:
-            args.whmcs_ip = str(ipaddress.ip_address(args.whmcs_ip))
-        except ValueError as error:
-            raise Failure("--whmcs-ip must be a single IPv4 or IPv6 address.") from error
+        args.whmcs_ip = whmcs_addresses(args.whmcs_ip)
     overrides = {}
     for override in args.host:
         try:

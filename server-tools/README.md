@@ -135,15 +135,16 @@ freshness or customer traffic.
 ## File manager and WAF
 
 First-time file-manager installation additionally needs the **WHMCS public key**
-and its outgoing IP address:
+and its outgoing addresses. A WHMCS host with both IPv4 and IPv6 reaches the servers over either, so list both,
+comma separated; the key is refused from any other address:
 
 ```sh
 sudo ispconfig-rest server-tools install \
-  --file-manager-key /root/whmcs-files.pub --whmcs-ip 192.0.2.10
+  --file-manager-key /root/whmcs-files.pub --whmcs-ip 192.0.2.10,2001:db8::10
 ```
 
 Never supply a private key here. Subsequent installs/updates reuse each server's
-existing public key and egress IP unless replacements are explicitly supplied.
+existing public key and egress addresses unless replacements are explicitly supplied.
 WHMCS's private file-manager mapping still needs each server's trusted host key,
 address and local private-key path; see the [file manager instructions](../file-manager-worker/README.md).
 

@@ -3,6 +3,7 @@
 import fcntl
 import grp
 import hashlib
+import ipaddress
 import json
 import os
 import pathlib
@@ -197,6 +198,14 @@ def provision(site, key):
         os.close(rootfd)
 
 
+def restricted_key(config, public):
+    # from= is a further restriction; only the configured WHMCS egress addresses (IPv4 and/or IPv6) can use this key.
+    # Installations before hosting 1.1.0 kept a single address.
+    addresses = config.get('whmcs_ips') or [config['whmcs_ip']]
+    sources = ','.join(str(ipaddress.ip_address(address)) for address in addresses)
+    return 'restrict,from="' + sources + '" ' + public[0] + ' ' + public[1]
+
+
 def main():
     if os.geteuid() != 0:
         raise SystemExit('Run the installed helper as root.')
@@ -209,10 +218,7 @@ def main():
     public = (ETC / 'client.pub').read_text().strip().split()
     if len(public) < 2 or public[0] not in ('ssh-ed25519', 'ssh-rsa'):
         raise ValueError('invalid public key')
-    # from= is a further restriction; only the configured WHMCS egress IP can use this key.
-    import ipaddress
-    source = str(ipaddress.ip_address(config['whmcs_ip']))
-    key = 'restrict,from="' + source + '" ' + public[0] + ' ' + public[1]
+    key = restricted_key(config, public)
     sites = json.loads(run(['/usr/bin/php', str(HERE / 'sites.php')]).stdout)
     active = {'ispcp-fm-' + str(int(site['id'])) for site in sites}
     for path in (ETC / 'keys').iterdir():

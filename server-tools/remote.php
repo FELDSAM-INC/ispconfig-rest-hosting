@@ -288,18 +288,37 @@ final class ServerToolsRemote
     {
         if (is_file($root.'/whmcs.pub')) {
             $key = $root.'/whmcs.pub';
-            $ip = trim(file_get_contents($root.'/whmcs-ip'));
+            $addresses = explode(',', trim(file_get_contents($root.'/whmcs-ip')));
         } else {
             copy('/etc/ispcp-files/client.pub', $root.'/whmcs-existing.pub');
             $key = $root.'/whmcs-existing.pub';
             $config = json_decode(file_get_contents('/etc/ispcp-files/config.json'), true, 8, JSON_THROW_ON_ERROR);
-            $ip = $config['whmcs_ip'] ?? '';
-        }
-        if (! filter_var($ip, FILTER_VALIDATE_IP)) {
-            throw new RuntimeException('A valid WHMCS egress IP is required for the file manager.');
+            // Installations before hosting 1.1.0 kept a single address
+            $addresses = (array) ($config['whmcs_ips'] ?? [$config['whmcs_ip'] ?? '']);
         }
 
-        return ['sh', $root.'/file-manager-worker/install.sh', '--no-run', $key, $ip];
+        return ['sh', $root.'/file-manager-worker/install.sh', '--no-run', $key, self::whmcsAddresses($addresses)];
+    }
+
+    /**
+     * The WHMCS egress addresses as the installer's comma-separated list (IPv4 and/or IPv6).
+     *
+     * @param  array<int, mixed>  $addresses
+     */
+    public static function whmcsAddresses(array $addresses): string
+    {
+        $valid = [];
+        foreach ($addresses as $address) {
+            if (! is_string($address) || ! filter_var(trim($address), FILTER_VALIDATE_IP)) {
+                throw new RuntimeException('Valid WHMCS egress IP addresses are required for the file manager.');
+            }
+            $valid[] = inet_ntop(inet_pton(trim($address)));
+        }
+        if ($valid === [] || count($valid) > 4) {
+            throw new RuntimeException('Valid WHMCS egress IP addresses are required for the file manager.');
+        }
+
+        return implode(',', array_values(array_unique($valid)));
     }
 }
 

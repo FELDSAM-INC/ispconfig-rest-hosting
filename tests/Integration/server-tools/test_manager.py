@@ -13,6 +13,9 @@ ROOT = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location("manager", ROOT / "server-tools/manage.py")
 manager = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(manager)
+RECONCILE_SPEC = importlib.util.spec_from_file_location("reconcile", ROOT / "file-manager-worker/reconcile.py")
+reconcile = importlib.util.module_from_spec(RECONCILE_SPEC)
+RECONCILE_SPEC.loader.exec_module(reconcile)
 
 
 class ManagerTests(unittest.TestCase):
@@ -40,6 +43,23 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual([], manager.components_for(row, manager.COMPONENTS))
         row.update(mirror_of=0, active=False)
         self.assertEqual([], manager.components_for(row, manager.COMPONENTS))
+
+    def test_whmcs_addresses_of_a_dual_stack_host(self):
+        self.assertEqual("192.0.2.10", manager.whmcs_addresses("192.0.2.10"))
+        self.assertEqual("192.0.2.10,2001:db8::10", manager.whmcs_addresses(" 192.0.2.10, 2001:0db8::10 ,192.0.2.10"))
+        for value in ("", ",", "192.0.2.10;id", "host.example.test", "1.1.1.1,1.1.1.2,1.1.1.3,1.1.1.4,1.1.1.5"):
+            with self.subTest(value=value), self.assertRaises(manager.Failure):
+                manager.whmcs_addresses(value)
+
+    def test_the_file_manager_key_accepts_every_whmcs_address(self):
+        public = ["ssh-ed25519", "AAAAC3NzaC1lZDI1NTE5AAAAIExample"]
+        self.assertEqual('restrict,from="192.0.2.10,2001:db8::10" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample',
+                         reconcile.restricted_key({"whmcs_ips": ["192.0.2.10", "2001:0db8::10"]}, public))
+        # Installations before hosting 1.1.0 kept one address
+        self.assertEqual('restrict,from="192.0.2.10" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample',
+                         reconcile.restricted_key({"whmcs_ip": "192.0.2.10"}, public))
+        with self.assertRaises(ValueError):
+            reconcile.restricted_key({"whmcs_ips": ['192.0.2.10" command="id']}, public)
 
     def test_inventory_rejects_ssh_option_and_shell_injection(self):
         for host in ("-oProxyCommand=id", "good;id", "$(id)", "root@host", "host\nother", "host space"):
