@@ -2,7 +2,8 @@
 
 The [server tools CLI](../server-tools/README.md) can discover webservers and install
 or update this worker over SSH. Select `--components file-manager`; first-time
-installation also requires `--file-manager-key` (the WHMCS public key) and `--whmcs-ip`.
+installation also requires `--file-manager-key` (the WHMCS public key) and `--whmcs-ip` (its outgoing addresses; give
+both the IPv4 and the IPv6 address of a dual-stack WHMCS host, comma separated).
 
 Optional server component for the WHMCS file manager. Install it on
 **each ISPConfig webserver** whose websites should offer file management, even
@@ -21,13 +22,13 @@ and DisableForwarding, openssl, mount, logger and standard account tools.
    Do not run a web-writable API checkout from root cron. From the staging directory:
 
    ```sh
-   sudo sh install.sh /root/whmcs-file-manager.pub WHMCS_EGRESS_IP
+   sudo sh install.sh /root/whmcs-file-manager.pub WHMCS_EGRESS_IP[,WHMCS_EGRESS_IP...]
    ```
 
 3. Obtain the server's public SSH host key through a trusted administrator
    connection. Configure WHMCS's private `ISPCP_FILE_MANAGER_CONFIG` JSON mapping
-   with the webserver address, pinned host key and private key path. Select the
-   same IP family as the allowed WHMCS egress address.
+   with the webserver address, pinned host key and private key path. The installer must list every address WHMCS
+   can connect from (IPv4 and IPv6 for a dual-stack host); SSH refuses the key from any other.
 
 Re-run the installer from the updated REST release to upgrade. Installed paths:
 
@@ -61,7 +62,7 @@ Each login shares the website's UID/GID to preserve ownership and filesystem
 quotas. Its root-owned OpenSSH chroot contains only a bind mount of that website's
 web directory, a private trash mount and a read-only identity fingerprint. No shell, PTY, forwarding,
 password login or user rc is allowed. The public key is restricted to the WHMCS
-egress IP. Normal website/SSH accounts are unaffected. Vhost aliases/subdomains
+egress addresses. Normal website/SSH accounts are unaffected. Vhost aliases/subdomains
 have separate jails for their web folders. Mounts are restored after reboot.
 
 The private trash directory is `<document_root>/private/.ispcp-trash-<website ID>`,

@@ -27,6 +27,20 @@ class ServerToolsRemoteTest extends TestCase
         $this->assertSame(['SELECT', 'INSERT', 'UPDATE', 'DELETE'], $tables['api_php_limits_usage']);
     }
 
+    public function test_whmcs_addresses_accept_ipv4_and_ipv6(): void
+    {
+        $this->assertSame('192.0.2.10', \ServerToolsRemote::whmcsAddresses(['192.0.2.10']));
+        $this->assertSame('192.0.2.10,2001:db8::10', \ServerToolsRemote::whmcsAddresses([' 192.0.2.10', '2001:0db8:0:0::10', '192.0.2.10']));
+        foreach ([[], [''], ['192.0.2.10;id'], ['1.1.1.1', '1.1.1.2', '1.1.1.3', '1.1.1.4', '1.1.1.5'], [null]] as $addresses) {
+            try {
+                \ServerToolsRemote::whmcsAddresses($addresses);
+                $this->fail('accepted '.json_encode($addresses));
+            } catch (\RuntimeException $e) {
+                $this->assertStringContainsString('WHMCS egress IP addresses', $e->getMessage());
+            }
+        }
+    }
+
     public function test_unrecognized_component_is_rejected(): void
     {
         $this->expectException(\RuntimeException::class);
