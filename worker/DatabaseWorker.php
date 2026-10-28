@@ -392,6 +392,11 @@ final class DatabaseWorker
     private function process(array $command, string $input, string $output, ?callable $monitor = null): void
     {
         $phase = $command[0] === '/usr/bin/mysqldump' ? 'dumping' : 'importing';
+        // Imports may contain SELECT statements whose results vastly exceed
+        // the uploaded SQL. Their stdout is unused and must never consume disk.
+        if ($phase === 'importing') {
+            $output = '/dev/null';
+        }
         $this->tick($phase);
         $lastMonitor = 0;
         $error = $this->directory.'/stderr';

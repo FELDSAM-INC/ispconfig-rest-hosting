@@ -5,6 +5,19 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-10-28
+
+### Security
+
+- Database imports and copies discard unused SQL query output instead of writing it to the worker filesystem.
+  Exported dump output and configured raw-SQL limits keep their existing behavior.
+
+### Upgrade notes
+
+- After updating the extension, refresh the database worker on the database servers:
+  `sudo ispconfig-rest server-tools update --components database`.
+- No migrations. Compatible with ispconfig-rest 1.x from 1.1.0.
+
 ## [1.1.3] - 2026-10-17
 
 ### Fixed
