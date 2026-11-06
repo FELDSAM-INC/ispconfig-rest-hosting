@@ -154,7 +154,7 @@ final class WebWafAudit
             if ($nginx || ! preg_match('/\bat ARGS:([A-Za-z0-9_.\-]{1,128})\.(?= \[(?:file|id|line) ")/', $data, $parameter)) {
                 preg_match('/\bARGS:([A-Za-z0-9_.\-]{1,128})(?=[:\s\x27"\)])/', $data, $parameter);
             }
-            $out[$id] = ['event_key' => hash('sha256', $unique.':'.$id), 'occurred_at' => $occurred, 'rule_id' => $id,
+            $out[$id] = ['event_key' => hash('sha256', $unique.':'.$id), 'request_key' => hash('sha256', $unique), 'occurred_at' => $occurred, 'rule_id' => $id,
                 'outcome' => $blocked ? 'blocked' : 'detected', 'client_ip' => filter_var($ip, FILTER_VALIDATE_IP) ? $ip : '',
                 'method' => preg_match('/\A[A-Z]{1,16}\z/D', $method) ? $method : '', 'path' => $path,
                 'parameter' => $parameter[1] ?? '', 'message' => self::description($id, $catalog[$id] ?? 'Rule '.$id.' matched', $rendered),

@@ -5,6 +5,39 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-07
+
+### Added
+
+- WAF bans (spec 048). The root WAF worker bans a client on HTTP and HTTPS of its web server through fail2ban when,
+  within 10 minutes across the server's WAF websites, it sends 20 requests over the anomaly threshold to enforcing
+  websites (attack) or hits 15 distinct paths with scanner, protocol or restricted-file rules (scan, also on
+  detection websites). One hour, a week for the third ban within a day. Allowlisted, private and reserved
+  addresses, the server's own and `/etc/ispconfig-waf/ban-ignore.conf` are never banned; an allowlisted client is
+  unbanned within a minute. Settings in `/etc/ispconfig-waf/ban.local.json`; `ispconfig-waf bans` and
+  `ispconfig-waf unban ADDRESS`. The WAF installer installs fail2ban and its jails, and warns instead of failing
+  when another jail keeps fail2ban from running.
+- `GET /sites/web-domains/{id}/waf/clients`: the website's clients of the last 7 days with events, requests,
+  requests over the threshold, first/last seen and their current ban.
+- `client_ip` (address or CIDR block) and `banned` filters for `GET /sites/web-domains/{id}/waf/events`, and
+  `client_banned` on each event.
+
+### Changed
+
+- The WAF worker keeps at most 100 events per client of a website (within the 1,000 per website), so a single
+  scanner no longer evicts the other clients' events. Per-client totals count every collected event.
+- The WAF worker's database account also needs SELECT/INSERT/UPDATE/DELETE on `api_web_waf_clients` and
+  `api_web_waf_bans`.
+
+### Upgrade notes
+
+- Run the migrations (`ispconfig-rest extension:update hosting --tag v1.3.0`), then
+  `ispconfig-rest server-tools update --components waf --yes` for the worker, its grants and fail2ban.
+- Check `ispconfig-waf bans` on each web server afterwards. If the installer warned that fail2ban does not run,
+  run `fail2ban-client -t` and fix or disable the reported jail (often `dovecot` or `postfix-sasl` without a mail
+  log on a web-only server).
+- Add the addresses of monitoring services and administrators to `/etc/ispconfig-waf/ban-ignore.conf`.
+
 ## [1.2.6] - 2026-11-06
 
 ### Added

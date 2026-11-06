@@ -7,7 +7,7 @@ printf '<?php\n' > /usr/local/ispconfig/server/lib/config.inc.php
 ln -s /tmp/plugin.php "/usr/local/ispconfig/server/plugins-enabled/${engine/apache/apache2}_plugin.inc.php"
 a2dismod security2
 cp -R /app/waf-server /opt/waf-release/
-cp /app/src/Support/WebWaf{Policy,Audit,Profiles,Crs,IspconfigSecurity}.php /opt/waf-release/src/Support/
+cp /app/src/Support/WebWaf{Policy,Audit,Profiles,Crs,IspconfigSecurity,Bans,Collector}.php /opt/waf-release/src/Support/
 chown -R root:root /opt/waf-release
 chmod -R go-w /opt/waf-release
 printf '#!/bin/sh\nexit 0\n' > /usr/bin/systemctl
@@ -29,13 +29,18 @@ version=$(php -r 'echo json_decode(file_get_contents("/app/waf-server/crs.json")
 [[ $(ispconfig-waf status | php -r 'echo json_decode(stream_get_contents(STDIN), true)["rules_version"];') = "$version" ]]
 grep -q '^SecAction' /etc/ispconfig-waf/crs-setup.conf
 if dpkg-query -W -f='${Status}' modsecurity-crs 2>/dev/null | grep -q ' installed$'; then echo 'Distribution CRS installed'; exit 1; fi
-echo "PASS $engine installer, status, refresh, root permissions, cron and rotation, upstream CRS $version"
+[[ $(stat -c %a /var/log/ispconfig-waf/bans.log) = 600 && -s /etc/fail2ban/jail.d/ispconfig-waf.local && -s /etc/fail2ban/filter.d/ispconfig-waf-recidive.conf ]]
+[[ -f /usr/local/lib/ispconfig-rest-waf/WebWafBans.php && -f /usr/local/lib/ispconfig-rest-waf/WebWafCollector.php ]]
+grep -q 'bans.log' /etc/logrotate.d/ispconfig-rest-waf
+echo "PASS $engine installer, status, refresh, root permissions, cron and rotation, upstream CRS $version, fail2ban jails"
 
 # Re-running keeps local CRS settings and the verified copy; a modified copy is replaced from the pinned release.
 printf '# administrator setting\n' >> /etc/ispconfig-waf/crs-setup.local.conf
+printf '203.0.113.0/24\n' >> /etc/ispconfig-waf/ban-ignore.conf
 marker=$(stat -c %i "$crs/$version/.ispconfig-crs.json")
 bash /opt/waf-release/waf-server/install.sh
 grep -q '^# administrator setting$' /etc/ispconfig-waf/crs-setup.local.conf
+grep -qx '203.0.113.0/24' /etc/ispconfig-waf/ban-ignore.conf
 [[ $(stat -c %i "$crs/$version/.ispconfig-crs.json") = "$marker" ]]
 plugin="$crs/current/plugins/wordpress-rule-exclusions-before.conf"
 pinned=$(php -r 'echo json_decode(file_get_contents("/app/waf-server/crs.json"), true)["plugins"]["wordpress"]["files"]["wordpress-rule-exclusions-before.conf"];')

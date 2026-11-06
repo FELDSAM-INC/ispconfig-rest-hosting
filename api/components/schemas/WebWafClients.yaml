@@ -1,0 +1,29 @@
+type: object
+required: [data, meta]
+properties:
+  data:
+    type: array
+    items:
+      type: object
+      required: [client_ip, events, requests, over_threshold, first_seen, last_seen, ban]
+      properties:
+        client_ip: {type: string}
+        events: {type: integer, description: Rule events of this client on the website.}
+        requests: {type: integer, description: Requests that matched at least one rule.}
+        over_threshold: {type: integer, description: Requests over the inbound or outbound anomaly threshold.}
+        first_seen: {type: string, format: date-time}
+        last_seen: {type: string, format: date-time}
+        ban:
+          type: object
+          nullable: true
+          required: [reason, banned_at, expires_at]
+          properties:
+            reason: {type: string, enum: [attack, scan, repeat, other]}
+            banned_at: {type: string, format: date-time}
+            expires_at: {type: string, format: date-time, nullable: true}
+  meta:
+    type: object
+    properties:
+      total: {type: integer}
+      limit: {type: integer}
+      offset: {type: integer}

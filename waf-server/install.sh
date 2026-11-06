@@ -11,7 +11,7 @@ for waf_source in "$source_dir" "$source_dir/../src/Support"; do
         waf_source=$(dirname "$waf_source")
     done
 done
-for waf_file in "$source_dir"/{install.sh,run.php,configure.php,crs.json,crs-release-key.gpg,ispconfig-security.php,ispconfig-waf} "$source_dir/../src/Support"/{WebWafPolicy.php,WebWafAudit.php,WebWafProfiles.php,WebWafCrs.php,WebWafIspconfigSecurity.php}; do
+for waf_file in "$source_dir"/{install.sh,run.php,configure.php,crs.json,crs-release-key.gpg,ispconfig-security.php,ispconfig-waf} "$source_dir"/fail2ban/{ispconfig-waf.local,ispconfig-waf.conf,ispconfig-waf-recidive.conf} "$source_dir/../src/Support"/{WebWafPolicy.php,WebWafAudit.php,WebWafProfiles.php,WebWafCrs.php,WebWafIspconfigSecurity.php,WebWafBans.php,WebWafCollector.php}; do
     [[ -f "$waf_file" && ! -L "$waf_file" && $(stat -c %u "$waf_file") = 0 ]] && [[ $(( 8#$(stat -c %a "$waf_file") & 0022 )) = 0 ]] || { echo 'Installer files must be regular root-owned files without group/other write access.' >&2; exit 1; }
 done
 if [[ ${1:-} = --ispconfig-security-only ]]; then
@@ -41,12 +41,12 @@ fi
 apt-get update
 # OWASP CRS comes from the upstream release pinned in crs.json, not from the older distribution package.
 if [[ "$engine" = apache ]]; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove libapache2-mod-security2 curl gpgv ca-certificates
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove libapache2-mod-security2 curl gpgv ca-certificates fail2ban
     engine_packages=(libapache2-mod-security2)
     engine_minimum=2.9.6
 else
     # Distribution packages ensure the connector matches the installed nginx ABI.
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove libnginx-mod-http-modsecurity curl gpgv ca-certificates
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove libnginx-mod-http-modsecurity curl gpgv ca-certificates fail2ban
     engine_packages=(libmodsecurity3 libmodsecurity3t64)
     engine_minimum=3.0.8
 fi
@@ -61,7 +61,7 @@ install -d -o root -g root -m 0755 /etc/ispconfig-waf
 install -d -o root -g root -m 0700 /var/log/ispconfig-waf
 install -d -o www-data -g www-data -m 0700 /var/lib/ispconfig-rest-waf-tmp /var/lib/ispconfig-rest-waf-data
 for file in run.php configure.php crs.json crs-release-key.gpg; do install -o root -g root -m 0600 "$source_dir/$file" /usr/local/lib/ispconfig-rest-waf/; done
-for file in WebWafPolicy.php WebWafAudit.php WebWafProfiles.php WebWafCrs.php; do install -o root -g root -m 0600 "$source_dir/../src/Support/$file" /usr/local/lib/ispconfig-rest-waf/; done
+for file in WebWafPolicy.php WebWafAudit.php WebWafProfiles.php WebWafCrs.php WebWafBans.php WebWafCollector.php; do install -o root -g root -m 0600 "$source_dir/../src/Support/$file" /usr/local/lib/ispconfig-rest-waf/; done
 # nginx packages do not ship the engine's reference configuration/unicode map.
 # Extract those data files from the signed distro package without installing Apache.
 if [[ ! -f /etc/modsecurity/modsecurity.conf-recommended || ! -f /etc/modsecurity/unicode.mapping ]]; then
@@ -82,7 +82,7 @@ cat > /etc/cron.d/ispconfig-rest-waf <<'CRON'
 CRON
 chmod 0644 /etc/cron.d/ispconfig-rest-waf
 cat > /etc/logrotate.d/ispconfig-rest-waf <<'ROTATE'
-/var/log/ispconfig-waf/*.json /var/log/ispconfig-waf/*.error {
+/var/log/ispconfig-waf/*.json /var/log/ispconfig-waf/*.error /var/log/ispconfig-waf/bans.log {
     daily
     maxsize 25M
     rotate 7
@@ -95,6 +95,25 @@ cat > /etc/logrotate.d/ispconfig-rest-waf <<'ROTATE'
 }
 ROTATE
 chmod 0644 /etc/logrotate.d/ispconfig-rest-waf
+# Bans (spec 048): the worker decides and writes bans.log, fail2ban enforces it on HTTP/HTTPS. The jail and filters are
+# replaced by updates; ban.local.json and ban-ignore.conf are the administrator's and never overwritten.
+[[ -e /var/log/ispconfig-waf/bans.log ]] || install -o root -g root -m 0600 /dev/null /var/log/ispconfig-waf/bans.log
+[[ -e /etc/ispconfig-waf/ban-ignore.conf ]] || printf '%s\n' '# Addresses or CIDR blocks the WAF never bans, one per line (spec 048).' > /etc/ispconfig-waf/ban-ignore.conf
+chown root:root /etc/ispconfig-waf/ban-ignore.conf
+chmod 0644 /etc/ispconfig-waf/ban-ignore.conf
+install -o root -g root -m 0644 "$source_dir/fail2ban/ispconfig-waf.local" /etc/fail2ban/jail.d/ispconfig-waf.local
+install -o root -g root -m 0644 "$source_dir/fail2ban/ispconfig-waf.conf" /etc/fail2ban/filter.d/ispconfig-waf.conf
+install -o root -g root -m 0644 "$source_dir/fail2ban/ispconfig-waf-recidive.conf" /etc/fail2ban/filter.d/ispconfig-waf-recidive.conf
+# Another jail can break fail2ban's whole configuration (e.g. a mail jail without its log on a web-only server); WAF
+# protection does not depend on it, so report instead of failing. The worker records bans once fail2ban runs.
+waf_fail2ban=enforced
+if fail2ban-client -t >/dev/null 2>&1; then
+    systemctl enable fail2ban >/dev/null 2>&1 || true
+    if fail2ban-client ping >/dev/null 2>&1; then fail2ban-client reload >/dev/null 2>&1 || waf_fail2ban=failed; else systemctl restart fail2ban || waf_fail2ban=failed; fi
+else
+    waf_fail2ban=failed
+fi
+[[ $waf_fail2ban = enforced ]] || echo 'Warning: fail2ban rejects its configuration or does not run, so WAF bans are not enforced. Run "fail2ban-client -t", fix the reported jail, then "fail2ban-client reload".' >&2
 if [[ -f /usr/local/ispconfig/security/apache_directives.blacklist ]]; then
     php "$source_dir/ispconfig-security.php"
 else

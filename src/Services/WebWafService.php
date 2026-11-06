@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
 use InvalidArgumentException;
 use IspconfigRestHosting\Support\WebWafAudit;
+use IspconfigRestHosting\Support\WebWafBans;
 use IspconfigRestHosting\Support\WebWafPolicy;
 use IspconfigRestHosting\Support\WebWafProfiles;
 use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
@@ -149,15 +150,74 @@ final class WebWafService
                 $query->where($field, $filters[$field]);
             }
         }
-        $total = $query->count();
+        $bans = $this->bans($site);
         $limit = (int) ($filters['limit'] ?? 50);
         $offset = (int) ($filters['offset'] ?? 0);
-        $data = $query->orderByDesc('id')->offset($offset)->limit($limit)->get()->map(function ($row): array {
+        if (isset($filters['client_ip']) || isset($filters['banned'])) {
+            // The worker keeps at most 1,000 events per website, so address blocks and bans are matched here.
+            $rows = $query->orderByDesc('id')->get()->filter(fn ($row): bool => $this->matches($row->client_ip, $filters, $bans))->values();
+            $total = $rows->count();
+            $rows = $rows->slice($offset, $limit);
+        } else {
+            $total = $query->count();
+            $rows = $query->orderByDesc('id')->offset($offset)->limit($limit)->get();
+        }
+        $data = $rows->map(function ($row) use ($bans): array {
             return ['id' => (int) $row->id, 'occurred_at' => gmdate('Y-m-d\TH:i:s\Z', $row->occurred_at), 'rule_id' => (int) $row->rule_id,
-                'outcome' => $row->outcome, 'client_ip' => $row->client_ip, 'method' => $row->method, 'path' => $row->path,
-                'parameter' => $row->parameter, 'message' => str_contains($row->message, '[value]') ? WebWafAudit::description((int) $row->rule_id, $row->message) : $row->message, 'severity' => $row->severity, 'source' => $row->source];
-        })->all();
+                'outcome' => $row->outcome, 'client_ip' => $row->client_ip, 'client_banned' => isset($bans[WebWafBans::canonical($row->client_ip)]),
+                'method' => $row->method, 'path' => $row->path, 'parameter' => $row->parameter,
+                'message' => str_contains($row->message, '[value]') ? WebWafAudit::description((int) $row->rule_id, $row->message) : $row->message, 'severity' => $row->severity, 'source' => $row->source];
+        })->values()->all();
 
         return ['data' => $data, 'meta' => ['total' => $total, 'limit' => $limit, 'offset' => $offset]];
+    }
+
+    /** The website's clients with their totals over the last 7 days and their ban on its server (spec 048). */
+    public function clients(WebDomain $site, array $filters): array
+    {
+        $limit = (int) ($filters['limit'] ?? 50);
+        $offset = (int) ($filters['offset'] ?? 0);
+        if (! Schema::hasTable('api_web_waf_clients')) {
+            return ['data' => [], 'meta' => ['total' => 0, 'limit' => $limit, 'offset' => $offset]];
+        }
+        $bans = $this->bans($site);
+        $query = DB::table('api_web_waf_clients')->where('website_id', $site->getKey())->where('server_id', $site->server_id)
+            ->where('identity', WebWafPolicy::identity($site->getAttributes()))->orderByDesc('requests')->orderByDesc('last_seen')->orderBy('id');
+        $rows = $query->get()->filter(fn ($row): bool => $this->matches($row->client_ip, $filters, $bans))->values();
+        $data = $rows->slice($offset, $limit)->map(function ($row) use ($bans): array {
+            $ban = $bans[WebWafBans::canonical($row->client_ip)] ?? null;
+
+            return ['client_ip' => $row->client_ip, 'events' => (int) $row->events, 'requests' => (int) $row->requests,
+                'over_threshold' => (int) $row->over_threshold, 'first_seen' => gmdate('Y-m-d\TH:i:s\Z', $row->first_seen),
+                'last_seen' => gmdate('Y-m-d\TH:i:s\Z', $row->last_seen), 'ban' => $ban === null ? null : [
+                    'reason' => in_array($ban->reason, ['attack', 'scan', 'repeat'], true) ? $ban->reason : 'other',
+                    'banned_at' => gmdate('Y-m-d\TH:i:s\Z', $ban->banned_at),
+                    'expires_at' => $ban->expires_at > 0 ? gmdate('Y-m-d\TH:i:s\Z', $ban->expires_at) : null]];
+        })->values()->all();
+
+        return ['data' => $data, 'meta' => ['total' => $rows->count(), 'limit' => $limit, 'offset' => $offset]];
+    }
+
+    /** Current bans of the website's server by canonical address. */
+    private function bans(WebDomain $site): array
+    {
+        if (! Schema::hasTable('api_web_waf_bans')) {
+            return [];
+        }
+        $bans = [];
+        foreach (DB::table('api_web_waf_bans')->where('server_id', $site->server_id)->where(fn ($query) => $query->where('expires_at', 0)->orWhere('expires_at', '>', time()))->get() as $ban) {
+            $bans[WebWafBans::canonical($ban->client_ip)] = $ban;
+        }
+
+        return $bans;
+    }
+
+    private function matches(string $ip, array $filters, array $bans): bool
+    {
+        if (isset($filters['client_ip']) && ! WebWafBans::contains($filters['client_ip'], $ip)) {
+            return false;
+        }
+
+        return ! isset($filters['banned']) || isset($bans[WebWafBans::canonical($ip)]) === $filters['banned'];
     }
 }

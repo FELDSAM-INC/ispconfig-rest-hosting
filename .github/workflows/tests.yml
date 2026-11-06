@@ -31,6 +31,13 @@ jobs:
       - name: Install and exercise the migration tool over SSH with MariaDB
         run: bash tests/Migration/integration.sh
 
+  waf-bans:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: WAF client totals, retention and bans with MariaDB and fail2ban
+        run: bash tests/Integration/waf/collector.sh
+
   phpunit:
     runs-on: ubuntu-latest
     strategy:

@@ -109,6 +109,78 @@ final class WebWafApiTest extends SitesApiTestCase
         $this->getJson($url)->assertUnauthorized();
     }
 
+    private function event(int $website, string $identity, string $ip, string $key, int $rule = 942100): void
+    {
+        DB::table('api_web_waf_events')->insert(['event_key' => hash('sha256', $key), 'server_id' => 1, 'website_id' => $website,
+            'identity' => $identity, 'occurred_at' => time(), 'rule_id' => $rule, 'outcome' => 'blocked',
+            'client_ip' => $ip, 'method' => 'GET', 'path' => '/', 'parameter' => '', 'message' => 'SQLi detected', 'severity' => '2', 'source' => 'owasp']);
+    }
+
+    private function ban(string $ip, int $expires, string $reason = 'attack', int $server = 1): void
+    {
+        DB::table('api_web_waf_bans')->insert(['server_id' => $server, 'client_ip' => $ip, 'jail' => 'ispconfig-waf', 'reason' => $reason,
+            'banned_at' => time() - 60, 'expires_at' => $expires]);
+    }
+
+    public function test_events_filter_by_client_address_block_and_current_ban(): void
+    {
+        TenantSchema::create();
+        $this->seedTenants();
+        $id = $this->seedVhost($this->ownedBy('clientA'));
+        $identity = WebWafPolicy::identity((array) DB::table('web_domain')->where('domain_id', $id)->first());
+        foreach (['203.0.113.5', '203.0.113.5', '203.0.113.77', '198.51.100.1', '2001:db8::7'] as $n => $ip) {
+            $this->event($id, $identity, $ip, 'filter-'.$n);
+        }
+        $this->ban('203.0.113.5', time() + 3600);
+        $this->ban('198.51.100.1', time() - 1);
+        $this->ban('2001:db8::7', time() + 3600, 'scan', 2);
+        $url = '/api/v1/sites/web-domains/'.$id.'/waf/events';
+        $headers = $this->tenantHeaders('clientA');
+        $this->getJson($url.'?client_ip=203.0.113.0/24', $headers)->assertOk()->assertJsonPath('meta.total', 3);
+        $this->getJson($url.'?client_ip=2001:0DB8::7', $headers)->assertOk()->assertJsonPath('meta.total', 1)->assertJsonPath('data.0.client_ip', '2001:db8::7')
+            ->assertJsonPath('data.0.client_banned', false);
+        $banned = $this->getJson($url.'?banned=true', $headers)->assertOk()->assertJsonPath('meta.total', 2);
+        $this->assertSame([true, true], array_column($banned->json('data'), 'client_banned'));
+        $this->assertSame(['203.0.113.5'], array_values(array_unique(array_column($banned->json('data'), 'client_ip'))));
+        $this->getJson($url.'?banned=false&client_ip=198.51.100.0/24', $headers)->assertOk()->assertJsonPath('meta.total', 1)->assertJsonPath('data.0.client_banned', false);
+        $this->getJson($url.'?banned=0&limit=2&offset=1', $headers)->assertOk()->assertJsonPath('meta.total', 3)->assertJsonCount(2, 'data');
+        $this->getJson($url, $headers)->assertOk()->assertJsonPath('meta.total', 5);
+        foreach (['client_ip=203.0.113.0/33', 'client_ip=example.com', 'client_ip=1.2.3.4/24/1', 'banned=maybe'] as $invalid) {
+            $this->getJson($url.'?'.$invalid, $headers)->assertUnprocessable();
+        }
+    }
+
+    public function test_clients_list_totals_and_bans_of_the_owners_website_only(): void
+    {
+        TenantSchema::create();
+        $this->seedTenants();
+        $id = $this->seedVhost($this->ownedBy('clientA'));
+        $other = $this->seedVhost($this->ownedBy('clientA', ['domain' => 'other.test']));
+        $identity = WebWafPolicy::identity((array) DB::table('web_domain')->where('domain_id', $id)->first());
+        $now = time();
+        $client = fn (int $website, string $identity, string $ip, int $requests, int $over) => DB::table('api_web_waf_clients')->insert(['server_id' => 1,
+            'website_id' => $website, 'identity' => $identity, 'client_ip' => $ip, 'events' => $requests * 3, 'requests' => $requests,
+            'over_threshold' => $over, 'first_seen' => $now - 600, 'last_seen' => $now - 60]);
+        $client($id, $identity, '198.18.93.178', 74, 74);
+        $client($id, $identity, '198.18.34.229', 170, 0);
+        $client($id, $identity, '198.51.100.1', 1, 1);
+        $client($id, '1-old-owner', '203.0.113.200', 900, 0);
+        $client($other, WebWafPolicy::identity((array) DB::table('web_domain')->where('domain_id', $other)->first()), '203.0.113.201', 900, 0);
+        $this->ban('198.18.93.178', $now + 3600);
+        $this->ban('198.18.34.229', $now + 604800, 'repeat');
+        $url = '/api/v1/sites/web-domains/'.$id.'/waf/clients';
+        $headers = $this->tenantHeaders('clientA');
+        $response = $this->getJson($url, $headers)->assertOk()->assertHeader('Cache-Control', 'no-store, private')->assertJsonPath('meta.total', 3);
+        $this->assertSame(['198.18.34.229', '198.18.93.178', '198.51.100.1'], array_column($response->json('data'), 'client_ip'));
+        $response->assertJsonPath('data.0.ban.reason', 'repeat')->assertJsonPath('data.1.ban.reason', 'attack')->assertJsonPath('data.1.over_threshold', 74)
+            ->assertJsonPath('data.1.events', 222)->assertJsonPath('data.2.ban', null)->assertJsonPath('data.1.ban.expires_at', gmdate('Y-m-d\TH:i:s\Z', $now + 3600));
+        $this->getJson($url.'?client_ip=198.18.93.0/24', $headers)->assertOk()->assertJsonPath('meta.total', 1);
+        $this->getJson($url.'?banned=true&limit=1', $headers)->assertOk()->assertJsonPath('meta.total', 2)->assertJsonCount(1, 'data');
+        $this->getJson($url.'?limit=101', $headers)->assertUnprocessable();
+        $this->getJson($url, $this->tenantHeaders('clientB'))->assertNotFound();
+        $this->getJson($url)->assertUnauthorized();
+    }
+
     public function test_locked_client_cannot_change_waf(): void
     {
         TenantSchema::create();

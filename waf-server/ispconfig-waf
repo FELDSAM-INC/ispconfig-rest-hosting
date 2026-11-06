@@ -11,5 +11,17 @@ case "${1:-status}" in
     status|atomic-disable|refresh)
         php /usr/local/lib/ispconfig-rest-waf/configure.php "${1:-status}"
         ;;
-    *) echo 'Usage: ispconfig-waf status|atomic-key|atomic-disable|refresh' >&2; exit 1;;
+    bans)
+        # Clients banned by the WAF jails (spec 048) on this server's HTTP/HTTPS.
+        for jail in ispconfig-waf ispconfig-waf-recidive; do
+            fail2ban-client status "$jail" || { echo "fail2ban jail $jail is not running (fail2ban-client -t)." >&2; exit 1; }
+        done
+        ;;
+    unban)
+        address=${2:-}
+        [[ $address =~ ^[0-9A-Fa-f:.]{2,45}$ ]] && php -r 'exit(filter_var($argv[1], FILTER_VALIDATE_IP) ? 0 : 1);' "$address" || { echo 'Usage: ispconfig-waf unban ADDRESS' >&2; exit 1; }
+        for jail in ispconfig-waf ispconfig-waf-recidive; do fail2ban-client set "$jail" unbanip "$address" >/dev/null 2>&1 || true; done
+        echo "Unbanned $address. Add it to /etc/ispconfig-waf/ban-ignore.conf to never ban it again."
+        ;;
+    *) echo 'Usage: ispconfig-waf status|bans|unban ADDRESS|atomic-key|atomic-disable|refresh' >&2; exit 1;;
 esac

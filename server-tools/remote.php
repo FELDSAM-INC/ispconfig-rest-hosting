@@ -20,6 +20,7 @@ final class ServerToolsRemote
         ],
         'waf' => [
             'web_domain' => 'SELECT', 'api_web_waf_workers' => 'SELECT,INSERT,UPDATE', 'api_web_waf_events' => 'SELECT,INSERT,UPDATE,DELETE',
+            'api_web_waf_clients' => 'SELECT,INSERT,UPDATE,DELETE', 'api_web_waf_bans' => 'SELECT,INSERT,UPDATE,DELETE',
         ],
         // Reads only named.conf.local on the DNS server
         'dns-catalog' => [],
