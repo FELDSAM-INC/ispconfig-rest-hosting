@@ -5,6 +5,20 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-11-07
+
+### Fixed
+
+- Apache websites no longer get a copy of every WAF finding in their web server error log, which customers read
+  in WHMCS (`[security2:error] ModSecurity: Warning ...`). `base.conf` sets `LogLevel security2:crit` for the WAF
+  vhosts; ModSecurity 2 still records every finding and execution error in the JSON audit log behind the WAF tab.
+  nginx cannot separate them and is unchanged.
+
+### Upgrade notes
+
+- `ispconfig-rest extension:update hosting --tag v1.3.2 && ispconfig-rest server-tools update --components waf --yes`
+  rewrites `base.conf` and reloads Apache. No migrations.
+
 ## [1.3.1] - 2026-11-07
 
 ### Security

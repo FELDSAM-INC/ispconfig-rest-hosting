@@ -43,6 +43,11 @@ for mode in detection enforcing exclude allowip off; do
 done
 sleep .2
 php /app/tests/Integration/waf/check-audit.php "$engine"
+# Apache: the findings above are in the JSON audit logs only, not in the web server error log customers read.
+if [[ "$engine" = apache ]]; then
+    if grep -E 'ModSecurity: (Warning|Access denied)' /var/log/apache2/error.log; then echo 'apache WAF findings in the error log'; exit 1; fi
+    echo 'PASS apache WAF findings only in the JSON audit log, not in the error log'
+fi
 
 if [[ "$engine" = nginx ]]; then [[ -s /tmp/waf-original-error.log ]]; echo 'PASS nginx preserves original website error log'; fi
 
@@ -75,5 +80,6 @@ sleep .5
 { printf '<div class="has-warning">'; head -c 300000 /dev/zero | tr '\0' a; printf '</div>\n'; } > /tmp/waf-www/long.html
 [[ $(request /long.html) = 200 ]]
 sleep .2
-if grep -qi 'limits exceeded' "$errors"; then grep -i 'limits exceeded' "$errors" | tail -n 3; echo "$engine PCRE match limit exceeded"; exit 1; fi
+# ModSecurity 2 records execution errors as audit messages too, also when its error-log copy is not written (Apache).
+if grep -qi 'limits exceeded' "$errors" /var/log/ispconfig-waf/*.json; then grep -hi 'limits exceeded' "$errors" /var/log/ispconfig-waf/*.json | tail -n 3; echo "$engine PCRE match limit exceeded"; exit 1; fi
 echo "PASS $engine long response lines within the PCRE match limit"
