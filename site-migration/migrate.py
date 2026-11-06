@@ -112,6 +112,10 @@ def atomic_json(path, value):
         os.close(fd)
 
 
+# Website trees; ISPConfig's /var/www/DOMAIN symlinks resolve into /var/www/clients.
+WEB_ROOTS = (Path('/var/www/clients'), Path('/var/www/html'), Path('/srv/www'))
+
+
 def private_directory(path):
     path = Path(path).absolute()
     require(not path.is_symlink(), 'State directory cannot be a symlink')
@@ -119,9 +123,31 @@ def private_directory(path):
     info = path.stat()
     require(info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700,
             'State directory must belong to this user and have mode 0700')
-    require(not str(path.resolve()).startswith(('/var/www/', '/srv/www/')),
-            'Keep migration state and database credentials outside web roots')
-    return path.resolve()
+    resolved = path.resolve()
+    # A dedicated root-only directory on the /var/www file system is fine; website roots are not.
+    require(resolved != Path('/var/www') and not any(resolved == root or root in resolved.parents for root in WEB_ROOTS),
+            'Keep migration state and database credentials outside website roots (e.g. /var/www/ispcp-migration)')
+    parent = resolved.parent.stat()
+    require(parent.st_uid in (0, os.getuid()) and (not parent.st_mode & 0o022 or parent.st_mode & stat.S_ISVTX),
+            'The parent of the state directory must not be writable by other users')
+    return resolved
+
+
+def state_root(config):
+    """Directory holding one private state directory per domain (config "state_dir")."""
+    value = config.get('state_dir', str(DEFAULT_STATE))
+    require(isinstance(value, str) and value.startswith('/') and not any(c in value for c in '\x00\r\n'),
+            'state_dir must be an absolute path')
+    return Path(value)
+
+
+def directory_bytes(path):
+    total = 0
+    for directory, dirs, files in os.walk(path, followlinks=False):
+        for name in dirs + files:
+            with contextlib.suppress(OSError):
+                total += os.lstat(os.path.join(directory, name)).st_blocks * 512
+    return total
 
 
 def ssh_host(host):
@@ -381,7 +407,9 @@ class Migration:
         for field in ('web_server_id', 'db_server_id'):
             require(isinstance(self.target[field], int) and self.target[field] > 0, 'Invalid target ' + field)
         require(re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9.-]*(?::[0-9]{1,5})?', self.target['db_host']), 'Invalid target db_host')
-        fingerprint = hashlib.sha256(json.dumps([config, self.domain, self.client_id], sort_keys=True).encode()).hexdigest()
+        # state_dir only locates the state; moving it must not invalidate the migration.
+        settings = {key: value for key, value in config.items() if key != 'state_dir'}
+        fingerprint = hashlib.sha256(json.dumps([settings, self.domain, self.client_id], sort_keys=True).encode()).hexdigest()
         self.state = read_json(self.file) if self.file.exists() else {
             'version': 1, 'fingerprint': fingerprint, 'domain': self.domain,
             'client_id': self.client_id, 'objects': {}, 'round': 0, 'phase': 'planned',
@@ -467,6 +495,21 @@ class Migration:
         self.state['website_disk_quota_mb'] = self.state['quotas']['disk_mb']
         self.save()
 
+    def check_free_space(self):
+        """The private staging copy, target backup and SQL snapshots of a round live in the state directory."""
+        sizes = self.state['source_size']
+        copied = self.state['phase'] == 'copied'  # a final sync starts the next round and backs up the target
+        round_dir = self.directory / ('round-%03d' % (self.state['round'] + (1 if copied else 0)))
+        needed = sizes['web_bytes'] * (2 if copied else 1) + 2 * sum(sizes['databases'].values()) + 256 * MB
+        if round_dir.exists():
+            needed = max(needed - directory_bytes(round_dir), 0)  # partly staged by an interrupted run
+        free = shutil.disk_usage(self.directory).free
+        require(free >= needed,
+                'Not enough free space for the private staging copy: about %d MB needed, %d MB free in %s. '
+                'Set "state_dir" in the configuration to a larger file system (see README); nothing was written.'
+                % (-(-needed // MB), free // MB, self.directory))
+        return needed, free
+
     def refresh_allocation(self):
         self.state['quotas'] = self.allocation(self.usage_summary())
         self.state['website_disk_quota_mb'] = self.state['quotas']['disk_mb']
@@ -540,6 +583,7 @@ class Migration:
         self.state['client_label'] = client.get('username', '')
         self.state['source_size'] = self.measure_source(inventory)
         self.preflight()
+        staging, free = self.check_free_space()
         quotas, sizes = self.state['quotas'], self.state['source_size']
 
         def mb(value):
@@ -550,6 +594,7 @@ class Migration:
         print('Destination web access: ' + ('local (no SSH)' if self.local_web else 'SSH'))
         print('Website disk quota: %s (source files %d MB)' % (mb(quotas['disk_mb']), -(-sizes['web_bytes'] // MB)))
         print('Website traffic quota: ' + mb(quotas['traffic_mb']))
+        print('Staging space: about %d MB needed, %d MB free in %s' % (-(-staging // MB), free // MB, self.directory))
         print('Databases: ' + (', '.join('%s (quota %s, source %d MB)' % (
             db['database_name'], mb(quotas['databases_mb'][db['database_name']]),
             -(-sizes['databases'][db['database_name']] // MB)) for db in inventory['databases']) or '(none)'))
@@ -911,7 +956,7 @@ def parse_args(argv=None):
         actions.add_argument('--sync', dest='command', action='store_const', const='interactive_sync', help='Take a new source snapshot after the first migration')
         actions.add_argument('--status', dest='command', action='store_const', const='status', help='Show saved progress')
         parser.add_argument('--config', default=DEFAULT_CONFIG, help='Connection settings (normally configured once)')
-        parser.add_argument('--state', help='Existing state directory from a manual migration; normally derived from the domain')
+        parser.add_argument('--state', help='Existing state directory from a manual migration; normally state_dir/DOMAIN')
         parser.set_defaults(command='interactive', source_quiesced=False, target_quiesced=False, config_reviewed=False)
         args = parser.parse_args(argv[1:])
         try:
@@ -919,7 +964,6 @@ def parse_args(argv=None):
             require(args.client_id > 0, 'client ID must be positive')
         except (MigrationError, ValueError) as exc:
             parser.error(str(exc))
-        args.state = args.state or str(DEFAULT_STATE / args.domain)
         return args
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['plan', 'run', 'sync', 'publish', 'status'])
@@ -939,6 +983,14 @@ def main(argv=None):
     try:
         for command in ('ssh', 'rsync', 'php'):
             require(shutil.which(command), 'Install required local command: ' + command)
+        config = read_json(args.config)
+        if args.state is None:
+            args.state = str(state_root(config) / args.domain)
+            legacy = DEFAULT_STATE / args.domain
+            require(Path(args.state) == legacy or (Path(args.state) / 'state.json').exists()
+                    or not (legacy / 'state.json').exists(),
+                    'The migration state of %s is still in %s. Move it first: mv %s %s/'
+                    % (args.domain, legacy, legacy, state_root(config)))
         state_dir = private_directory(args.state)
         lock = os.open(state_dir / '.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         with os.fdopen(lock, 'w') as handle:
@@ -946,7 +998,7 @@ def main(argv=None):
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise MigrationError('Another process is using this migration state') from None
-            migration = Migration(read_json(args.config), state_dir, args.domain, args.client_id)
+            migration = Migration(config, state_dir, args.domain, args.client_id)
             if args.command == 'plan':
                 migration.plan()
             elif args.command == 'status':

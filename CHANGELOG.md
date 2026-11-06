@@ -5,6 +5,26 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.5] - 2026-11-06
+
+### Added
+
+- Migration `state_dir` configuration setting: the per-site state, staging copy, backups and SQL snapshots can live
+  on the website file system (e.g. `/var/www/ispcp-migration`) when the root file system is small. It does not
+  change the configuration fingerprint, so a started migration continues after moving its directory; the command
+  refuses to start over while the state is still in the previous location. Website roots remain refused.
+
+### Fixed
+
+- The migration plan checks the free space of the state file system before any write. Previously the staging
+  copy could fill the root file system (`rsync ... No space left on device`).
+
+### Upgrade notes
+
+- Update hosting and run `sudo ispconfig-rest server-tools update --components migration --server ID`. To move a
+  started migration: `mkdir -m 700 /var/www/ispcp-migration`, move its directory there, set `"state_dir"` (see the
+  migration README) and repeat the original command.
+
 ## [1.2.4] - 2026-11-06
 
 ### Fixed
