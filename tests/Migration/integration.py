@@ -85,6 +85,9 @@ class FakeApi:
     def get(self, path):
         if path == '/clients/3':
             return {'id': 3, 'username': 'whmcs-provisioned', 'web_servers': [1], 'db_servers': [1]}
+        if path == '/usage/summary?client_id=3':
+            allocated = sum(row['hd_quota'] for key, row in self.rows.items() if key.startswith('/sites/web-domains/'))
+            return {'client_id': 3, 'web_disk': {'limit_bytes': 5120 * 1048576, 'allocated_bytes': allocated * 1048576}}
         return self.rows[path]
 
     def all(self, path, **query):
@@ -107,6 +110,7 @@ class FakeApi:
         self.posts += 1
         row = dict(payload, id=104, sys_groupid=3)
         if endpoint == '/sites/web-domains':
+            assert payload['hd_quota'] == 5120, 'Website must use the client quota, not the legacy 10 GB setting'
             row.update(document_root='/var/www/clients/client3/web104', system_user='web104', system_group='client3')
             root = Path(row['document_root'])
             directory(root, 'web104', 'client3')
@@ -174,7 +178,7 @@ def main():
         'source': {'panel_ssh': 'root@127.0.0.1', 'web_ssh': 'root@127.0.0.1', 'db_ssh': {'1': 'root@127.0.0.1'}},
         'target': {'api_url': 'https://panel.example/api/v1', 'api_key_file': '/unused', 'web_ssh': 'root@127.0.0.1',
                    'db_ssh': 'root@127.0.0.1', 'web_server_id': 1, 'db_server_id': 1, 'db_host': 'db.example',
-                   'db_remote_ips': '10.0.10.21,10.0.10.20', 'hd_quota_mb': 1024, 'traffic_quota_mb': -1},
+                   'db_remote_ips': '10.0.10.21,10.0.10.20', 'hd_quota_mb': 10240, 'traffic_quota_mb': -1},
     }
     mode = os.environ.get('ISPCP_TEST_SOURCE_MODE', 'direct')
     if mode == 'via-web':

@@ -18,6 +18,39 @@ spec.loader.exec_module(m)
 
 
 class MigrationTests(unittest.TestCase):
+    def test_disk_quota_uses_remaining_allocation_not_measured_usage(self):
+        summary = {'client_id': 6, 'web_disk': {'limit_bytes': 5120 * 1048576,
+                   'allocated_bytes': 1024 * 1048576, 'used_bytes': 1}}
+        self.assertEqual(4096, m.available_disk_mb(summary, 6))
+        summary['web_disk']['allocated_bytes'] = 0
+        self.assertEqual(5120, m.available_disk_mb(summary, 6))
+        summary['web_disk']['limit_bytes'] = None
+        self.assertEqual(-1, m.available_disk_mb(summary, 6))
+
+    def test_missing_wrong_or_exhausted_quota_stops_before_provisioning(self):
+        for summary in [{}, {'client_id': 7}, {'client_id': 6, 'web_disk': {}},
+                        {'client_id': 6, 'web_disk': {'limit_bytes': 5120}},
+                        {'client_id': 6, 'web_disk': {'limit_bytes': 5120, 'allocated_bytes': 5120}}]:
+            with self.subTest(summary=summary), self.assertRaises(m.MigrationError):
+                m.available_disk_mb(summary, 6)
+
+    def test_retry_and_sync_keep_already_created_website_quota(self):
+        migration = object.__new__(m.Migration)
+        migration.state = {'objects': {'site': {'record': {'hd_quota': 5120}}}}
+        migration.admin = MagicMock()
+        self.assertEqual(5120, migration.website_disk_quota())
+        migration.admin.get.assert_not_called()
+
+    def test_problem_summary_exposes_limits_without_reflected_credentials(self):
+        problem = {'type': 'https://github.com/FELDSAM-INC/ispconfig-rest/blob/main/docs/problems.md#quota-exceeded',
+                   'detail': 'password=private-secret', 'title': 'private-secret',
+                   'limit': {'name': 'limit_web_quota', 'scope': 'client', 'max': 5120, 'used': 0, 'requested': 10240}}
+        result = m.problem_summary(json.dumps(problem))
+        self.assertEqual('quota-exceeded: limit_web_quota (client); max=5120; used=0; requested=10240', result)
+        self.assertNotIn('private-secret', result)
+        for body in ['<html>private-secret</html>', '[]', '{"detail":"private-secret"}']:
+            self.assertEqual('', m.problem_summary(body))
+
     def patch_wp(self, source):
         payload = {'content': base64.b64encode(source.encode()).decode(), 'databases': {
             'old_db': {'old_user': 'old_user', 'name': 'c3new', 'user': 'c3newuser', 'password': "a'\\b$9", 'host': 'db0'}}}

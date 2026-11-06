@@ -47,6 +47,37 @@ class ApiError(MigrationError):
         self.status = status
 
 
+def problem_summary(body):
+    """Expose known problem identifiers/numeric limits, never reflected secrets."""
+    try:
+        problem = json.loads(body)
+    except (ValueError, UnicodeError):
+        return ''
+    if not isinstance(problem, dict):
+        return ''
+    prefix = 'https://github.com/FELDSAM-INC/ispconfig-rest/blob/main/docs/problems.md#'
+    kind = problem.get('type', '')
+    known = ('account-locked', 'limit-reached', 'quota-exceeded', 'feature-not-allowed',
+             'server-not-assigned', 'validation-failed', 'resource-in-use')
+    if kind not in [prefix + name for name in known]:
+        return ''
+    result = kind[len(prefix):]
+    limit = problem.get('limit')
+    names = ('limit_web_quota', 'limit_traffic_quota', 'limit_web_domain', 'limit_web_aliasdomain',
+             'limit_web_subdomain', 'limit_database', 'limit_database_user', 'limit_database_quota')
+    if isinstance(limit, dict) and limit.get('name') in names:
+        result += ': ' + limit['name']
+        if limit.get('scope') in ('client', 'reseller'):
+            result += ' (' + limit['scope'] + ')'
+        for name in ('max', 'used', 'requested'):
+            value = limit.get(name)
+            if type(value) is int:
+                result += '; %s=%d' % (name, value)
+            elif name == 'requested' and name in limit and value is None:
+                result += '; requested=unlimited'
+    return result
+
+
 def require(condition, message):
     if not condition:
         raise MigrationError(message)
@@ -154,8 +185,14 @@ class Api:
                 body = response.read()
                 return json.loads(body) if body else {}, response.headers.get('X-Change-Set-Id')
         except urllib.error.HTTPError as exc:
-            # No server response or request payload is printed: it can contain credentials.
-            raise ApiError('REST %s %s returned HTTP %s; inspect API logs.' % (method, path, exc.code), exc.code) from None
+            # Raw response bodies/details may contain reflected credentials.
+            # Only known problem names and numeric limit metadata reach the terminal.
+            try:
+                summary = problem_summary(exc.read(16384))
+            except (OSError, ValueError):
+                summary = ''
+            message = 'REST %s %s returned HTTP %s' % (method, path, exc.code)
+            raise ApiError(message + (': ' + summary if summary else '; inspect API logs.'), exc.code) from None
         except (urllib.error.URLError, TimeoutError, OSError, ValueError):
             raise MigrationError('REST request failed: %s %s; a POST may already have committed.' % (method, path)) from None
 
@@ -201,6 +238,23 @@ def validate_inventory(inventory, domain):
     # Vhost children have separate roots/configuration and must be migrated deliberately.
     require(all(child['type'] in ('alias', 'subdomain') for child in inventory['children']),
             'Source has child vhosts with their own settings. Migrate these separately; see inventory.json.')
+
+
+def available_disk_mb(summary, client_id):
+    """Use the API's allocated quotas, not measured filesystem usage."""
+    require(isinstance(summary, dict) and summary.get('client_id') == client_id,
+            'Quota summary belongs to a different ISPConfig client')
+    metric = summary.get('web_disk')
+    require(isinstance(metric, dict) and 'limit_bytes' in metric, 'API did not return the website disk limit')
+    limit = metric['limit_bytes']
+    if limit is None:
+        return -1
+    allocated = metric.get('allocated_bytes')
+    require(type(limit) is int and limit >= 0 and type(allocated) is int and allocated >= 0,
+            'API did not return a valid website quota allocation')
+    remaining = (limit - allocated) // (1024 * 1024)
+    require(remaining > 0, 'No unallocated website disk quota remains for this client; review its product and existing websites')
+    return remaining
 
 
 def normalize_links(tree, old_root):
@@ -289,6 +343,15 @@ class Migration:
         execute(argv, data=(json.dumps({'server_id': self.target['web_server_id']}) + '\n').encode(),
                 error_path=self.directory / 'server-check.log')
 
+    def website_disk_quota(self):
+        existing = self.state['objects'].get('site', {}).get('record')
+        if existing is not None:
+            # Resume/sync must keep the quota of the website already created,
+            # even when its allocation now consumes the account's whole limit.
+            return int(existing['hd_quota'])
+        summary = self.admin.get('/usage/summary?client_id=' + str(self.client_id))
+        return available_disk_mb(summary, self.client_id)
+
     def source_database_route(self, database, inventory=None):
         inventory = inventory or self.state['inventory']
         if 'db_via_web' in self.source:
@@ -332,10 +395,13 @@ class Migration:
             require(inventory == self.state['inventory'], 'Source inventory changed; review it before continuing this migration')
         self.state['inventory'] = inventory
         self.state['client_label'] = client.get('username', '')
+        self.state['website_disk_quota_mb'] = self.website_disk_quota()
         self.save()
         print('PLAN: %s → ISPConfig client %s (%s)' % (self.domain, self.client_id, self.state['client_label']))
         print('Web: %s:%s → %s; PHP configuration ID %s' % (self.source['web_ssh'], inventory['site']['document_root'], self.target['web_ssh'], self.target.get('server_php_id', 0)))
         print('Destination web access: ' + ('local (no SSH)' if self.local_web else 'SSH'))
+        quota = self.state['website_disk_quota_mb']
+        print('Website disk quota: ' + ('unlimited' if quota == -1 else str(quota) + ' MB'))
         print('Databases: ' + (', '.join(db['database_name'] for db in inventory['databases']) or '(none)'))
         if 'db_via_web' in self.source:
             connection = self.source['db_via_web']
@@ -383,6 +449,10 @@ class Migration:
         require('key' in key, 'Uncertain migration-key creation; find and revoke migration-' + self.state['nonce'] + ' before clearing only client_key in state.json')
         self.admin.request('PUT', '/system/api-keys/' + str(key['id']), {'active': True})
         self.api = Api(self.target['api_url'], key=key['key'])
+        # Refresh immediately before creating a new website. The API still
+        # enforces the client/reseller caps if allocations change concurrently.
+        self.state['website_disk_quota_mb'] = self.website_disk_quota()
+        self.save()
         source = self.state['inventory']['site']
         payload = {
             'domain': self.domain, 'type': 'vhost', 'client_id': self.client_id,
@@ -390,7 +460,7 @@ class Migration:
             'php': 'php-fpm',
             'active': True, 'subdomain': source['subdomain'], 'ssl': False,
             'ssl_letsencrypt': False, 'rewrite_to_https': False,
-            'hd_quota': self.target['hd_quota_mb'], 'traffic_quota': self.target['traffic_quota_mb'],
+            'hd_quota': self.state['website_disk_quota_mb'], 'traffic_quota': self.target['traffic_quota_mb'],
         }
         # Omitting a version permits the API's first allowed version when the
         # built-in default is hidden; explicitly submitting zero is rejected there.
