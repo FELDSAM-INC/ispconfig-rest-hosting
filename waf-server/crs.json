@@ -1,8 +1,8 @@
 {
-    "version": "4.25.1",
-    "archive": "https://github.com/coreruleset/coreruleset/releases/download/v4.25.1/coreruleset-4.25.1-minimal.tar.gz",
-    "sha256": "e314bc5b64a268ae4264822bc93db24eb93c5eb648ff80aed96b23f3fce2c701",
-    "signature": "https://github.com/coreruleset/coreruleset/releases/download/v4.25.1/coreruleset-4.25.1-minimal.tar.gz.asc",
+    "version": "4.25.2",
+    "archive": "https://github.com/coreruleset/coreruleset/releases/download/v4.25.2/coreruleset-4.25.2-minimal.tar.gz",
+    "sha256": "a2d4b2a5bb4f397f7e40d4e22d0346350706a5f17c1cfefc09e8b9740e00d87e",
+    "signature": "https://github.com/coreruleset/coreruleset/releases/download/v4.25.2/coreruleset-4.25.2-minimal.tar.gz.asc",
     "fingerprint": "36006F0E0BA167832158821138EEACA1AB8A6E72",
     "plugins": {
         "wordpress": {

@@ -5,6 +5,28 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-11-07
+
+### Security
+
+- OWASP CRS 4.25.2 (LTS) instead of 4.25.1, with its security backports: command injection in the URL path (RCE
+  rules 932125–932390 also inspect `REQUEST_FILENAME`), upper-case `charset` in `Content-Type` (920480, the
+  malformed-charset scans of 2026-11-06), shadowed multipart `_charset_` (922100), a bypassable SQL `(X)OR` length
+  bound (942390) and upload filenames ending in `/` (933110, 944140); see the
+  [release notes](https://github.com/coreruleset/coreruleset/releases/tag/v4.25.2). Verified like every pin: release
+  key signature and SHA-256, native Apache and nginx checks.
+
+### Added
+
+- Weekly `crs-update` workflow and `tools/crs-update.php`: a newer release of the pinned CRS LTS line is verified
+  with the pinned release key, checked on the native engines, committed to `develop` and reported in an issue.
+
+### Upgrade notes
+
+- `ispconfig-rest extension:update hosting --tag v1.3.1`, then
+  `ispconfig-rest server-tools update --components waf --yes`. RCE rules now also inspect URL paths, so review new
+  events of websites in detection mode for false positives. No migrations.
+
 ## [1.3.0] - 2026-11-07
 
 ### Added
