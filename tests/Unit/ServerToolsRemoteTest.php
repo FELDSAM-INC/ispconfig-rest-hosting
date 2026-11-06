@@ -11,6 +11,12 @@ require_once dirname(__DIR__, 2).'/server-tools/remote.php';
 
 class ServerToolsRemoteTest extends TestCase
 {
+    public function test_migration_needs_no_worker_table_grants(): void
+    {
+        $this->assertSame([], \ServerToolsRemote::permissions(['migration']));
+        $this->assertSame(\ServerToolsRemote::permissions(['database']), \ServerToolsRemote::permissions(['database', 'migration']));
+    }
+
     public function test_native_tables_are_read_only_and_no_global_grants_exist(): void
     {
         $tables = \ServerToolsRemote::permissions(['database', 'web-logs', 'file-manager', 'waf', 'php-limits']);

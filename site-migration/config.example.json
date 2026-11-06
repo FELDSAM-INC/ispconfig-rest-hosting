@@ -1,0 +1,23 @@
+{
+  "source": {
+    "panel_ssh": "root@web0.feldhost.cz",
+    "web_ssh": "root@web0.feldhost.cz",
+    "db_via_web": {
+      "host": "db0.feldhost.cz",
+      "port": 3306
+    }
+  },
+  "target": {
+    "api_url": "https://panel0.nova.feldhost.cz:8090/api/v1",
+    "api_key_file": "/root/.config/ispcp-migrate/api-key",
+    "web_ssh": "root@web0.nova.feldhost.cz",
+    "web_server_id": 4,
+    "db_ssh": "root@db0.nova.feldhost.cz",
+    "db_server_id": 0,
+    "db_host": "db0.nova.feldhost.cz",
+    "db_remote_ips": "10.0.10.21,10.0.10.20",
+    "server_php_id": 0,
+    "hd_quota_mb": 10240,
+    "traffic_quota_mb": -1
+  }
+}

@@ -12,6 +12,7 @@ Hosting features for the [ISPConfig REST API](https://github.com/FELDSAM-INC/isp
 | Website WAF (ModSecurity, OWASP CRS) | `/sites/web-domains/{id}/waf`, `waf_available`, `waf_mode` | [WAF installer](waf-server/README.md) |
 | Product PHP policies and PHP-FPM limits | `web_php_policy`, `web_resource_limits` on clients, `/usage/resources` | [PHP-FPM limits](php-limits/README.md), [guide](docs/product-php-policy.md) |
 | DNS catalog zones for secondaries | — | [DNS catalog](dns-catalog/README.md) |
+| Old ISPConfig website migration into WHMCS-created accounts | Existing core REST endpoints | [Migration CLI](site-migration/README.md), `ispcp-migrate DOMAIN NEW_CLIENT_ID` |
 
 The endpoints and fields are the same as in ispconfig-rest up to 1.0.7, where these features shipped; the served
 OpenAPI document at `/api/documentation` includes them while the extension is installed.
@@ -22,11 +23,11 @@ On the REST host, with ispconfig-rest 1.1 or a later 1.x installed:
 
 ```sh
 sudo ispconfig-rest extension:install hosting                 # follows main
-sudo ispconfig-rest extension:install hosting --tag v1.1.4    # or a pinned release
+sudo ispconfig-rest extension:install hosting --tag v1.2.0    # or a pinned release
 sudo ispconfig-rest server-tools install --help               # workers on the ISPConfig servers
 ```
 
-New installations can add `--extension hosting` (or `hosting@v1.1.4`) to ispconfig-rest's `install.sh`.
+New installations can add `--extension hosting` (or `hosting@v1.2.0`) to ispconfig-rest's `install.sh`.
 `ispconfig-rest update` also updates the extension on its own channel (branch or pinned release);
 `ispconfig-rest extension:update hosting [--branch NAME | --tag VERSION]` changes or updates it alone.
 `ispconfig-rest extension:list` shows whether it is loaded. A release states the ispconfig-rest versions it supports
@@ -42,7 +43,7 @@ Installations up to 1.0.7 had these features built in. Their database tables kee
 nothing is migrated again:
 
 ```sh
-sudo ispconfig-rest update --tag v1.4.1      # or --branch main
+sudo ispconfig-rest update --tag v1.4.2      # or --branch main
 sudo ispconfig-rest extension:install hosting
 sudo ispconfig-rest server-tools update      # refreshes the workers from this repository
 ```
@@ -54,6 +55,13 @@ the servers keep working; `server-tools update` replaces them with the same code
 
 [server-tools/README.md](server-tools/README.md) covers automatic ISPConfig server discovery, SSH key setup,
 component selection and the file-manager public key.
+
+The optional [migration tool](site-migration/README.md) installs on a selected new web server through
+`ispconfig-rest server-tools install --components migration --server ID`. After one-time connection setup,
+run `ispcp-migrate example.com 123` there as root (`123` is the new ISPConfig client ID). It reads the old
+ISPConfig through root SSH, can export the old database through the old web server, and creates destination
+resources through client-scoped REST permissions. Product changes and **Create** in WHMCS remain manual.
+This component requires hosting v1.2.0+ and ispconfig-rest v1.4.2+.
 
 ## Development
 

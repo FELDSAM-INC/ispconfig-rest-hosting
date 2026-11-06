@@ -18,8 +18,18 @@ jobs:
         run: |
           python3 -m unittest discover -s tests/Integration/server-tools -p 'test_*.py'
           python3 -m unittest discover -s tests/WordPress -p 'test_*.py'
+          python3 -m unittest discover -s tests/Migration -p 'test_*.py'
           bash -n bin/ispconfig-rest-extension php-limits/install.sh dns-catalog/install.sh
           sh -n php-limits/ispconfig-php-limits worker/install.sh file-manager-worker/install.sh file-manager-worker/wordpress-install.sh
+          bash -n site-migration/install.sh
+          sh -n site-migration/ispcp-migrate
+
+  migration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install and exercise the migration tool over SSH with MariaDB
+        run: bash tests/Migration/integration.sh
 
   phpunit:
     runs-on: ubuntu-latest
@@ -60,7 +70,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [tools, phpunit]
+    needs: [tools, phpunit, migration]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -27,7 +27,7 @@ class ManagerTests(unittest.TestCase):
 
     def test_role_selection_and_mirrors(self):
         row = self.row()
-        self.assertEqual(["web-logs", "file-manager", "waf", "php-limits"], manager.components_for(row, manager.COMPONENTS))
+        self.assertEqual(["web-logs", "file-manager", "waf", "php-limits", "migration"], manager.components_for(row, manager.COMPONENTS))
         self.assertEqual(["web-logs", "file-manager", "waf"], manager.components_for(row, manager.DEFAULT_COMPONENTS))
         self.assertEqual(["database", "web-logs", "file-manager", "waf"], manager.requested_components(self.args()))
         # An update or status covers every installed component, php-limits and dns-catalog included
@@ -41,7 +41,7 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(["database", "dns-catalog"], manager.components_for(row, manager.COMPONENTS))
         self.assertEqual(["database"], manager.components_for(row, manager.DEFAULT_COMPONENTS))
         row.update(web=True, database=False)
-        self.assertEqual(["web-logs", "file-manager", "waf", "php-limits", "dns-catalog"], manager.components_for(row, manager.COMPONENTS))
+        self.assertEqual(["web-logs", "file-manager", "waf", "php-limits", "migration", "dns-catalog"], manager.components_for(row, manager.COMPONENTS))
         row.update(web=False, database=True, dns=False)
         row["mirror_of"] = 3
         self.assertEqual([], manager.components_for(row, manager.COMPONENTS))
@@ -167,6 +167,27 @@ class ManagerTests(unittest.TestCase):
             target, _, _ = self.main_fixture(stack)
             self.assertEqual(0, manager.main(["update", "--dry-run"]))
             self.assertEqual(["web-logs"], target.probe.call_args_list[1].args[0])
+
+    def test_migration_is_explicit_and_can_update_without_file_manager_configuration(self):
+        with contextlib.ExitStack() as stack:
+            target, _, package = self.main_fixture(stack)
+            target.probe.return_value['file_manager_configured'] = False
+            target.probe.return_value['installed'] = ['migration']
+            self.assertEqual(0, manager.main(['install', '--components', 'migration', '--dry-run']))
+            self.assertEqual(['migration'], target.probe.call_args_list[-1].args[0])
+            package.assert_not_called()
+            target.install.assert_not_called()
+        with contextlib.ExitStack() as stack:
+            target, _, package = self.main_fixture(stack)
+            target.probe.return_value['installed'] = ['migration']
+            self.assertEqual(0, manager.main(['update', '--dry-run']))
+            self.assertEqual(['migration'], target.probe.call_args_list[1].args[0])
+
+    def test_migration_archive_contains_all_runtime_files(self):
+        for path in (ROOT / 'site-migration').iterdir():
+            if path.is_file():
+                self.assertIn('site-migration/' + path.name, manager.FILES)
+        self.assertIn('worker/SqlDump.php', manager.FILES)
 
     def test_any_failed_target_stops_before_fetch_or_install(self):
         with contextlib.ExitStack() as stack:
