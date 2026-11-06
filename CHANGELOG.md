@@ -5,6 +5,25 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-11-06
+
+### Fixed
+
+- Migration website disk quota now uses the client's remaining allocation from `/usage/summary`: plan limit
+  minus quotas already assigned to websites, or unlimited for an unlimited plan. The plan displays the result
+  and refreshes it before creating the website. Existing websites keep their quota on resume and final sync.
+- Old `hd_quota_mb` configuration values no longer override the client's allowance. Existing configuration and
+  state can be retained unchanged, including a migration rejected because the former 10 GB default exceeded a
+  5 GB account. Traffic quota remains separately configured.
+- REST refusals show recognized problem identifiers and numeric limit information without printing raw response
+  bodies, request payloads or potentially reflected credentials.
+
+### Upgrade notes
+
+- After updating hosting, refresh the migration CLI with
+  `sudo ispconfig-rest server-tools update --components migration --server ID`, then repeat the original command.
+  No product limit or API permission is increased.
+
 ## [1.2.2] - 2026-11-06
 
 ### Fixed

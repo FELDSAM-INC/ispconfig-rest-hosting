@@ -18,7 +18,6 @@
     "db_host": "db.example.net",
     "db_remote_ips": "10.20.30.21,10.20.30.20",
     "server_php_id": 0,
-    "hd_quota_mb": 10240,
     "traffic_quota_mb": -1
   }
 }
