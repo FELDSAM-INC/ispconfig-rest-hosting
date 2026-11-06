@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+test "$(id -u)" = 0 || { echo 'Run as root: sudo ispcp-migrate DOMAIN NEW_CLIENT_ID' >&2; exit 1; }
+umask 077
+exec flock --shared /var/lib/ispconfig-rest-migration/.install.lock \
+    python3 /usr/local/lib/ispconfig-rest-migration/migrate.py --simple "$@"

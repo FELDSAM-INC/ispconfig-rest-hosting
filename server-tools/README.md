@@ -11,6 +11,7 @@ checks passwordless SSH, copies the release and runs the existing installers:
 | `waf` | Web server | Apache/nginx ModSecurity, OWASP CRS and audit worker |
 | `php-limits` | Web server | PHP-FPM cgroup limits per account and website (opt-in) |
 | `dns-catalog` | DNS server | Catalog zone for secondaries of the server's DNS zones (opt-in, [guide](../dns-catalog/README.md)) |
+| `migration` | Web server | Administrator command `ispcp-migrate DOMAIN NEW_CLIENT_ID` (opt-in, [guide](../site-migration/README.md)) |
 
 Inactive servers, mirrors and servers without a selected role are listed as
 skipped. The current workers identify websites by their owning server ID; mirrored
@@ -34,11 +35,17 @@ sudo ispconfig-rest server-tools update
 
 # Inspect installed components, prerequisites and SQL permissions:
 sudo ispconfig-rest server-tools status
+
+# Migration command on the destination web server (replace 4 with its ID):
+sudo ispconfig-rest server-tools install --components migration --server 4
 ```
+
+The migration component requires hosting v1.2.0+ and ispconfig-rest v1.4.2+.
+Its [guide](../site-migration/README.md) covers one-time connection settings and the two-argument command.
 
 `install` ensures selected components are installed, and also updates existing
 ones. `update` never adds a component absent from that server. The default component
-selection is all components except `php-limits`, which restarts PHP-FPM once when
+selection is all components except `migration` (an administrator CLI), `php-limits`, which restarts PHP-FPM once when
 installed and must be selected explicitly (`sudo ispconfig-rest php-limits:install`),
 and `dns-catalog`, which opens zone transfers to its TSIG key on DNS servers
 (`sudo ispconfig-rest dns-catalog:install`); `update` includes them where they are installed. `--dry-run` performs read-only discovery and target checks;

@@ -23,6 +23,8 @@ final class ServerToolsRemote
         ],
         // Reads only named.conf.local on the DNS server
         'dns-catalog' => [],
+        // Interactive administrator CLI; destination metadata writes use REST client keys.
+        'migration' => [],
         'php-limits' => [
             'api_client_resource_limits' => 'SELECT', 'api_php_limits_workers' => 'SELECT,INSERT,UPDATE', 'api_php_limits_usage' => 'SELECT,INSERT,UPDATE,DELETE',
         ],
@@ -128,6 +130,9 @@ final class ServerToolsRemote
         if (array_intersect($components, ['database', 'web-logs']) !== []) {
             $extensions[] = 'zlib';
         }
+        if (in_array('migration', $components, true)) {
+            $extensions[] = 'tokenizer';
+        }
         foreach ($extensions as $extension) {
             if (! extension_loaded($extension)) {
                 $requirements[] = 'PHP extension '.$extension;
@@ -142,6 +147,14 @@ final class ServerToolsRemote
         }
         if (in_array('file-manager', $components, true)) {
             $programs = array_merge($programs, ['python3', 'ssh-keygen', 'openssl', 'mount', 'logger', 'useradd', 'groupadd', 'sshd']);
+        }
+        if (in_array('migration', $components, true)) {
+            $programs = array_merge($programs, ['python3', 'ssh', 'rsync', 'flock']);
+            $process = proc_open(['python3', '-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)'],
+                [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+            if (! is_resource($process) || proc_close($process) !== 0) {
+                $requirements[] = 'Python 3.9+';
+            }
         }
         if (in_array('waf', $components, true)) {
             $programs[] = 'apt-get';
@@ -179,6 +192,7 @@ final class ServerToolsRemote
             'waf' => '/etc/cron.d/ispconfig-rest-waf',
             'php-limits' => '/etc/cron.d/ispconfig-rest-php-limits',
             'dns-catalog' => '/etc/systemd/system/ispconfig-dns-catalog.path',
+            'migration' => '/usr/local/sbin/ispcp-migrate',
         ];
         $installed = array_keys(array_filter($paths, 'is_file'));
         if (is_file('/etc/cron.d/ispcp-files')) {
@@ -190,8 +204,13 @@ final class ServerToolsRemote
         if ($requirements !== []) {
             return $result;
         }
-        $db = self::connection($conf);
         $tables = self::permissions($components);
+        if ($tables === []) {
+            $result['grants'] = ['account' => '', 'database' => '', 'missing' => []];
+
+            return $result;
+        }
+        $db = self::connection($conf);
         $result['grants'] = ['account' => $db->query('SELECT CURRENT_USER()')->fetchColumn(), 'database' => $db->query('SELECT DATABASE()')->fetchColumn(), 'missing' => self::missingGrants($db, $tables)];
         if (in_array('file-manager', $components, true)) {
             self::connection($conf, true)->query('SELECT domain_id FROM web_domain WHERE 1=0');
@@ -266,6 +285,7 @@ final class ServerToolsRemote
                     'waf' => ['bash', $root.'/waf-server/install.sh'],
                     'php-limits' => ['bash', $root.'/php-limits/install.sh'],
                     'dns-catalog' => ['bash', $root.'/dns-catalog/install.sh'],
+                    'migration' => ['bash', $root.'/site-migration/install.sh'],
                     'file-manager' => self::fileManagerCommand($root),
                     'panel-security' => ['bash', $root.'/waf-server/install.sh', '--ispconfig-security-only'],
                     default => throw new RuntimeException('Unknown installer.'),

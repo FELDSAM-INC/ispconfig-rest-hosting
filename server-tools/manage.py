@@ -16,9 +16,9 @@ import tarfile
 import tempfile
 
 
-COMPONENTS = ("database", "web-logs", "file-manager", "waf", "php-limits", "dns-catalog")
+COMPONENTS = ("database", "web-logs", "file-manager", "waf", "php-limits", "dns-catalog", "migration")
 # php-limits restarts PHP-FPM once when installed and dns-catalog opens zone transfers to a TSIG key, so they are
-# only installed when selected.
+# only installed when selected. Migration is an administrator CLI, also opt-in.
 DEFAULT_COMPONENTS = ("database", "web-logs", "file-manager", "waf")
 REPOSITORY = "https://github.com/FELDSAM-INC/ispconfig-rest-hosting.git"
 FILES = (
@@ -35,6 +35,10 @@ FILES = (
     "src/Support/WebWafCrs.php", "src/Support/WebWafIspconfigSecurity.php", "php-limits/install.sh", "php-limits/run.php",
     "php-limits/ispconfig-php-limits", "src/Support/PhpLimits.php", "server-tools/remote.php",
     "dns-catalog/install.sh", "dns-catalog/run.php", "dns-catalog/ispconfig-dns-catalog", "src/Support/DnsCatalog.php",
+    "site-migration/install.sh", "site-migration/ispcp-migrate", "site-migration/migrate.py",
+    "site-migration/target-files.py", "site-migration/source-inventory.php", "site-migration/server-check.php",
+    "site-migration/db-io.php", "site-migration/wordpress-config.php", "site-migration/normalize-sql.php",
+    "site-migration/config.example.json", "site-migration/README.md",
 )
 
 
@@ -232,7 +236,7 @@ def package_release(args, directory, run_as):
 
 
 def requested_components(args):
-    """The components of the command: as given, or by default all but php-limits and dns-catalog for install and every
+    """The components of the command: explicit, or the default workers for install and every
     component for update and status, which act only on what each server has installed."""
     value = args.components if args.components is not None else ",".join(DEFAULT_COMPONENTS if args.action == "install" else COMPONENTS)
     return list(dict.fromkeys(value.split(",")))
@@ -254,7 +258,7 @@ def whmcs_addresses(value):
 def parser():
     result = argparse.ArgumentParser(description="Install/update ISPConfig REST workers and WAF across ISPConfig servers.")
     result.add_argument("action", choices=("install", "update", "status"))
-    result.add_argument("--components", help="Comma-separated database,web-logs,file-manager,waf,php-limits,dns-catalog (install default: all except php-limits and dns-catalog; update and status: every installed one)")
+    result.add_argument("--components", help="Comma-separated database,web-logs,file-manager,waf,php-limits,dns-catalog,migration (install default: database,web-logs,file-manager,waf; update and status: every installed one)")
     result.add_argument("--server", type=int, action="append", default=[], help="Only this server ID (repeatable)")
     result.add_argument("--host", action="append", default=[], metavar="ID=HOST", help="Override SSH address/alias for a server")
     result.add_argument("--ssh-user", default="root", help="SSH user; non-root requires passwordless sudo")
@@ -380,6 +384,8 @@ def main(argv=None):
         if failures:
             raise Failure("Some components failed; successful installations are retained. Correct the errors and rerun.\n" + "\n".join(failures))
     print("Server tools installed/updated. Worker capabilities appear after the next minute's cron run.")
+    if "migration" in requested:
+        print("Migration CLI: configure /etc/ispconfig-rest-migration/config.json on the selected web server, then run ispcp-migrate DOMAIN NEW_CLIENT_ID there.")
     if "waf" in requested:
         print("WAF stays disabled on new sites. Optional per-server Atomicorp key: sudo ispconfig-waf atomic-key")
     if "file-manager" in requested:

@@ -15,6 +15,7 @@ case "${1:-}" in
   ispconfig-rest server-tools install --help      SSH, server selection and component options
   ispconfig-rest php-limits:install|update [OPTIONS]  PHP-FPM cgroup limits (restarts PHP-FPM once)
   ispconfig-rest dns-catalog:install|update [OPTIONS] DNS catalog zone for secondaries (DNS servers)
+  ispconfig-rest server-tools install --components migration --server ID  install ispcp-migrate on a web server
 HELP
     exit 0;;
 esac

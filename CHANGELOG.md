@@ -5,6 +5,25 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-06
+
+### Added
+
+- Optional `migration` server tool for websites moved from an old ISPConfig into accounts manually created by
+  WHMCS. Install it on a new web server with `ispconfig-rest server-tools install --components migration --server ID`,
+  then run `ispcp-migrate DOMAIN NEW_CLIENT_ID` after one-time connection setup. It supports source DB export through
+  the old web server, client-scoped REST provisioning, file/SQL snapshots, WordPress configuration updates and final
+  synchronization. [Installation and migration guide](site-migration/README.md).
+- Migration-tool updates preserve configuration and saved progress, and refuse to replace code while the installed
+  command is running. The tool is opt-in and adds no cron job or worker-table grants.
+
+### Upgrade notes
+
+- Existing hosting features remain compatible with ispconfig-rest 1.x from 1.1.0. The migration tool requires
+  ispconfig-rest 1.4.2+ and one-time connection setup on the destination web server.
+- Install the optional tool from the panel after updating hosting to v1.2.0:
+  `sudo ispconfig-rest server-tools install --components migration --server ID`.
+
 ## [1.1.4] - 2026-10-28
 
 ### Security
