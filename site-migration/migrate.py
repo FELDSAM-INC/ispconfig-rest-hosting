@@ -240,21 +240,81 @@ def validate_inventory(inventory, domain):
             'Source has child vhosts with their own settings. Migrate these separately; see inventory.json.')
 
 
-def available_disk_mb(summary, client_id):
-    """Use the API's allocated quotas, not measured filesystem usage."""
+MB = 1024 * 1024
+
+
+def remaining_mb(summary, client_id, metric_name, label):
+    """Unallocated MB of one client quota (-1 = unlimited).
+
+    Uses the API's allocated quotas, the same sums the API enforces on create,
+    not measured usage.
+    """
     require(isinstance(summary, dict) and summary.get('client_id') == client_id,
             'Quota summary belongs to a different ISPConfig client')
-    metric = summary.get('web_disk')
-    require(isinstance(metric, dict) and 'limit_bytes' in metric, 'API did not return the website disk limit')
+    metric = summary.get(metric_name)
+    require(isinstance(metric, dict) and 'limit_bytes' in metric, 'API did not return the %s limit' % label)
     limit = metric['limit_bytes']
     if limit is None:
         return -1
     allocated = metric.get('allocated_bytes')
     require(type(limit) is int and limit >= 0 and type(allocated) is int and allocated >= 0,
-            'API did not return a valid website quota allocation')
-    remaining = (limit - allocated) // (1024 * 1024)
-    require(remaining > 0, 'No unallocated website disk quota remains for this client; review its product and existing websites')
+            'API did not return a valid %s allocation' % label)
+    return max((limit - allocated) // MB, 0)
+
+
+def available_disk_mb(summary, client_id):
+    remaining = remaining_mb(summary, client_id, 'web_disk', 'website disk quota')
+    require(remaining != 0, 'No unallocated website disk quota remains for this client; review its product and existing websites')
     return remaining
+
+
+def available_traffic_mb(summary, client_id):
+    remaining = remaining_mb(summary, client_id, 'web_traffic_this_month', 'website traffic quota')
+    require(remaining != 0, 'No unallocated website traffic quota remains for this client; review its product and existing websites')
+    return remaining
+
+
+def database_quotas(summary, client_id, sizes):
+    """Split the client's unallocated database quota across databases still to create.
+
+    sizes maps database name -> measured source bytes. Shares are proportional
+    to the source sizes, so every database receives at least its current size.
+    """
+    if not sizes:
+        return {}
+    remaining = remaining_mb(summary, client_id, 'database_size', 'database quota')
+    if remaining == -1:
+        return {name: -1 for name in sizes}
+    needs = {name: max(-(-size // MB), 1) for name, size in sizes.items()}
+    total = sum(needs.values())
+    require(remaining >= total,
+            'Database quota is too small: %d MB unallocated, the source database(s) need %d MB (%s). '
+            'Raise the client database quota, then repeat the command.'
+            % (remaining, total, ', '.join('%s %d MB' % item for item in sorted(needs.items()))))
+    return {name: remaining * need // total for name, need in needs.items()}
+
+
+# Usage-summary count -> what the migration creates there.
+COUNT_LIMITS = {
+    'web_domains': 'websites', 'web_alias_domains': 'alias domains', 'web_subdomains': 'subdomains',
+    'database_users': 'database users', 'databases': 'databases',
+}
+
+
+def check_counts(summary, needed):
+    """Refuse before the first write when a client count limit cannot fit the migration."""
+    counts = summary.get('counts')
+    require(isinstance(counts, dict), 'API did not return the client usage counts')
+    for key, need in needed.items():
+        if not need:
+            continue
+        row = counts.get(key)
+        require(isinstance(row, dict) and type(row.get('used')) is int, 'API did not return the %s usage count' % key)
+        limit = row.get('limit')
+        require(limit is None or type(limit) is int, 'API returned an invalid %s limit' % key)
+        require(limit is None or row['used'] + need <= limit,
+                'Client limit for %s is too small: limit %d, used %d, migration needs %d more. '
+                'Raise the limit, then repeat the command.' % (COUNT_LIMITS[key], limit or 0, row['used'], need))
 
 
 def normalize_links(tree, old_root):
@@ -343,14 +403,95 @@ class Migration:
         execute(argv, data=(json.dumps({'server_id': self.target['web_server_id']}) + '\n').encode(),
                 error_path=self.directory / 'server-check.log')
 
-    def website_disk_quota(self):
-        existing = self.state['objects'].get('site', {}).get('record')
-        if existing is not None:
-            # Resume/sync must keep the quota of the website already created,
-            # even when its allocation now consumes the account's whole limit.
-            return int(existing['hd_quota'])
-        summary = self.admin.get('/usage/summary?client_id=' + str(self.client_id))
-        return available_disk_mb(summary, self.client_id)
+    def usage_summary(self):
+        return self.admin.get('/usage/summary?client_id=' + str(self.client_id))
+
+    def needed_counts(self):
+        """Objects this migration still has to create, per client count limit."""
+        objects = self.state['objects']
+        inventory = self.state['inventory']
+        children = [child for child in inventory['children'] if 'child:' + str(child['domain_id']) not in objects]
+        databases = [db['database_name'] for db in inventory['databases']]
+        return {
+            'web_domains': 0 if 'site' in objects else 1,
+            'web_alias_domains': sum(child['type'] == 'alias' for child in children),
+            'web_subdomains': sum(child['type'] == 'subdomain' for child in children),
+            'database_users': sum('user:' + name not in objects for name in databases),
+            'databases': sum('db:' + name not in objects for name in databases),
+        }
+
+    def allocation(self, summary):
+        """Quotas of the migrated objects, checked against the measured source sizes.
+
+        Objects already created keep their quota on resume/sync, even when
+        their allocation now consumes the account's whole limit. New objects
+        receive the client's unallocated quota (product limits, not static
+        configuration). The API still enforces client/reseller caps on create.
+        """
+        objects = self.state['objects']
+        sizes = self.state['source_size']
+
+        def unlimited(value):
+            value = int(value)
+            return value if value > 0 else -1
+
+        site = objects.get('site', {}).get('record')
+        if site is not None:
+            disk, traffic = unlimited(site['hd_quota']), unlimited(site.get('traffic_quota', -1))
+        else:
+            disk, traffic = available_disk_mb(summary, self.client_id), available_traffic_mb(summary, self.client_id)
+        databases, new = {}, {}
+        for db in self.state['inventory']['databases']:
+            name = db['database_name']
+            record = objects.get('db:' + name, {}).get('record')
+            if record is not None:
+                databases[name] = unlimited(record.get('database_quota', -1))
+            else:
+                new[name] = sizes['databases'][name]
+        databases.update(database_quotas(summary, self.client_id, new))
+        require(disk == -1 or sizes['web_bytes'] <= disk * MB,
+                'Source files (%d MB) exceed the website disk quota (%d MB). Raise the client disk quota, then repeat the command; stopped before copying.'
+                % (-(-sizes['web_bytes'] // MB), disk))
+        for name, quota in databases.items():
+            require(quota == -1 or sizes['databases'][name] <= quota * MB,
+                    'Source database %s (%d MB) exceeds its database quota (%d MB). Raise the quota, then repeat the command; stopped before copying.'
+                    % (name, -(-sizes['databases'][name] // MB), quota))
+        return {'disk_mb': disk, 'traffic_mb': traffic, 'databases_mb': databases}
+
+    def preflight(self):
+        """Validate every count limit and quota before the first write, so a
+        product limit never stops the migration between created objects."""
+        summary = self.usage_summary()
+        check_counts(summary, self.needed_counts())
+        self.state['quotas'] = self.allocation(summary)
+        self.state['website_disk_quota_mb'] = self.state['quotas']['disk_mb']
+        self.save()
+
+    def refresh_allocation(self):
+        self.state['quotas'] = self.allocation(self.usage_summary())
+        self.state['website_disk_quota_mb'] = self.state['quotas']['disk_mb']
+        self.save()
+        return self.state['quotas']
+
+    def measure_source(self, inventory):
+        """Read-only size check, so quota problems stop before any write."""
+        root = inventory['site']['document_root']
+        output = execute(remote(self.source['web_ssh'], ['du', '-sk', '--', root + '/web', root + '/private']),
+                         error_path=self.directory / 'source-size.log').decode()
+        lines = output.splitlines()
+        require(len(lines) == 2 and all(re.fullmatch(r'[0-9]+\t\S.*', line) for line in lines),
+                'Could not measure the source website size')
+        sizes = {'web_bytes': sum(int(line.split('\t', 1)[0]) for line in lines) * 1024, 'databases': {}}
+        for db in inventory['databases']:
+            host, connection = self.source_database_route(db, inventory)
+            with tempfile.TemporaryFile(dir=self.directory) as handle:
+                self.db_io({'action': 'size', 'source': True, 'database': db['database_name'], **connection},
+                           output=handle, host=host)
+                handle.seek(0)
+                value = handle.read().decode().strip()
+            require(re.fullmatch(r'[0-9]+', value), 'Could not measure source database size: ' + db['database_name'])
+            sizes['databases'][db['database_name']] = int(value)
+        return sizes
 
     def source_database_route(self, database, inventory=None):
         inventory = inventory or self.state['inventory']
@@ -393,16 +534,25 @@ class Migration:
                 'Target domain already exists outside this migration; refusing to adopt/overwrite it')
         if 'inventory' in self.state:
             require(inventory == self.state['inventory'], 'Source inventory changed; review it before continuing this migration')
+        for name, entry in self.state['objects'].items():
+            require('record' in entry, 'Uncertain previous POST for %s. Reconcile the API receipt in state.json before retrying; never delete state blindly.' % name)
         self.state['inventory'] = inventory
         self.state['client_label'] = client.get('username', '')
-        self.state['website_disk_quota_mb'] = self.website_disk_quota()
-        self.save()
+        self.state['source_size'] = self.measure_source(inventory)
+        self.preflight()
+        quotas, sizes = self.state['quotas'], self.state['source_size']
+
+        def mb(value):
+            return 'unlimited' if value == -1 else '%d MB' % value
+
         print('PLAN: %s → ISPConfig client %s (%s)' % (self.domain, self.client_id, self.state['client_label']))
         print('Web: %s:%s → %s; PHP configuration ID %s' % (self.source['web_ssh'], inventory['site']['document_root'], self.target['web_ssh'], self.target.get('server_php_id', 0)))
         print('Destination web access: ' + ('local (no SSH)' if self.local_web else 'SSH'))
-        quota = self.state['website_disk_quota_mb']
-        print('Website disk quota: ' + ('unlimited' if quota == -1 else str(quota) + ' MB'))
-        print('Databases: ' + (', '.join(db['database_name'] for db in inventory['databases']) or '(none)'))
+        print('Website disk quota: %s (source files %d MB)' % (mb(quotas['disk_mb']), -(-sizes['web_bytes'] // MB)))
+        print('Website traffic quota: ' + mb(quotas['traffic_mb']))
+        print('Databases: ' + (', '.join('%s (quota %s, source %d MB)' % (
+            db['database_name'], mb(quotas['databases_mb'][db['database_name']]),
+            -(-sizes['databases'][db['database_name']] // MB)) for db in inventory['databases']) or '(none)'))
         if 'db_via_web' in self.source:
             connection = self.source['db_via_web']
             print('Source MySQL: %s:%s via %s' % (connection['host'], connection.get('port', 3306), self.source['web_ssh']))
@@ -451,16 +601,17 @@ class Migration:
         self.api = Api(self.target['api_url'], key=key['key'])
         # Refresh immediately before creating a new website. The API still
         # enforces the client/reseller caps if allocations change concurrently.
-        self.state['website_disk_quota_mb'] = self.website_disk_quota()
-        self.save()
+        quotas = self.refresh_allocation()
         source = self.state['inventory']['site']
+        # Legacy target.hd_quota_mb/traffic_quota_mb settings are ignored (kept
+        # only in the configuration fingerprint): quotas follow the client.
         payload = {
             'domain': self.domain, 'type': 'vhost', 'client_id': self.client_id,
             'server_id': self.target['web_server_id'], 'ip_address': '*',
             'php': 'php-fpm',
             'active': True, 'subdomain': source['subdomain'], 'ssl': False,
             'ssl_letsencrypt': False, 'rewrite_to_https': False,
-            'hd_quota': self.state['website_disk_quota_mb'], 'traffic_quota': self.target['traffic_quota_mb'],
+            'hd_quota': quotas['disk_mb'], 'traffic_quota': quotas['traffic_mb'],
         }
         # Omitting a version permits the API's first allowed version when the
         # built-in default is hidden; explicitly submitting zero is rejected there.
@@ -496,10 +647,15 @@ class Migration:
                 'database_password': target_db['password'],
             })
             require(user['sys_groupid'] == site['sys_groupid'], 'Database user ownership changed')
+            if 'db:' + key not in self.state['objects']:
+                # Omitting the quota means unlimited, which a finite client
+                # database quota rejects. Refresh after earlier databases.
+                quotas = self.refresh_allocation()
             database = self.create('db:' + key, '/sites/databases', {
                 'parent_domain_id': site['id'], 'server_id': self.target['db_server_id'],
                 'database_name': short, 'database_user_id': user['id'], 'type': 'mysql',
                 'database_charset': source_db['database_charset'] or '', 'active': True,
+                'database_quota': quotas['databases_mb'][key],
                 'remote_access': True, 'remote_ips': self.target['db_remote_ips'],
             })
             require(database['parent_domain_id'] == site['id'] and database['server_id'] == self.target['db_server_id']

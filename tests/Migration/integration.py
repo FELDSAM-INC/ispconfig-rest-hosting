@@ -87,7 +87,11 @@ class FakeApi:
             return {'id': 3, 'username': 'whmcs-provisioned', 'web_servers': [1], 'db_servers': [1]}
         if path == '/usage/summary?client_id=3':
             allocated = sum(row['hd_quota'] for key, row in self.rows.items() if key.startswith('/sites/web-domains/'))
-            return {'client_id': 3, 'web_disk': {'limit_bytes': 5120 * 1048576, 'allocated_bytes': allocated * 1048576}}
+            databases = sum(row['database_quota'] for key, row in self.rows.items() if key.startswith('/sites/databases/'))
+            return {'client_id': 3, 'web_disk': {'limit_bytes': 5120 * 1048576, 'allocated_bytes': allocated * 1048576},
+                    'web_traffic_this_month': {'limit_bytes': None, 'allocated_bytes': 0},
+                    'database_size': {'limit_bytes': 1024 * 1048576, 'allocated_bytes': databases * 1048576},
+                    'counts': {key: {'used': 0, 'limit': None} for key in m.COUNT_LIMITS}}
         return self.rows[path]
 
     def all(self, path, **query):
@@ -111,6 +115,7 @@ class FakeApi:
         row = dict(payload, id=104, sys_groupid=3)
         if endpoint == '/sites/web-domains':
             assert payload['hd_quota'] == 5120, 'Website must use the client quota, not the legacy 10 GB setting'
+            assert payload['traffic_quota'] == -1, 'Traffic follows the unlimited client allowance'
             row.update(document_root='/var/www/clients/client3/web104', system_user='web104', system_group='client3')
             root = Path(row['document_root'])
             directory(root, 'web104', 'client3')
@@ -123,6 +128,7 @@ class FakeApi:
             assert "'" not in password
             sql("CREATE USER '%s'@'localhost' IDENTIFIED BY '%s';" % (username, password))
         elif endpoint == '/sites/databases':
+            assert payload['database_quota'] == 1024, 'Database must use the client database quota, never unlimited'
             row['database_name_full'] = 'c3' + payload['database_name']
             username = 'c3' + self.rows['/sites/database-users/104']['database_user']
             sql("CREATE DATABASE `%s`; GRANT ALL ON `%s`.* TO '%s'@'localhost';" % (row['database_name_full'], row['database_name_full'], username))
@@ -222,6 +228,10 @@ def main():
             (config_dir / 'config.inc.php').write_text("<?php $conf=array('server_id'=>1,'db_host'=>'localhost','db_user'=>'root','db_password'=>'','db_database'=>'dbispconfig');")
         migration.plan()
         assert FakeApi.posts == 0
+        # Read-only source measurement over real SSH (du) and MySQL (information_schema).
+        sizes = migration.state['source_size']
+        assert sizes['web_bytes'] > 0 and sizes['databases']['old_db'] > 0, sizes
+        assert migration.state['quotas'] == {'disk_mb': 5120, 'traffic_mb': -1, 'databases_mb': {'old_db': 1024}}
         assert 'old_db' in (Path(state) / 'inventory.json').read_text()
         assert migration.state['inventory']['site']['server_php_id'] == ('0' if mode == 'via-web' else '17')
         # A genuine schema error must identify its query and MySQL cause on

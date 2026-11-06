@@ -31,7 +31,7 @@ source and runs the installer on that web server. It installs:
 | `/etc/ispconfig-rest-migration/config.json` | Connection settings, configured once |
 | `/var/lib/ispconfig-rest-migration/DOMAIN/` | Private progress, SQL snapshots and backups for each site |
 
-On the new web server, edit `/etc/ispconfig-rest-migration/config.json`: set the new DB server ID, traffic quota,
+On the new web server, edit `/etc/ispconfig-rest-migration/config.json`: set the new DB server ID,
 PHP selection, source/destination SSH addresses and the administrator REST key file. The example already contains
 the `old-web.example.net → old-db.example.net` source route. Since v1.2.2 the installed CLI accesses the destination web
 server locally, including checks, backups and publication; it does not need SSH access back to itself.
@@ -69,24 +69,36 @@ process is running. No cron entry, web endpoint or additional worker-table grant
   It is revoked when `run`/`sync` exits normally or with a handled error, and reactivated on a retry.
 
 The installer creates a private configuration from `config.example.json` on first install. The example
-deliberately has `db_server_id: 0`: replace that with the real **new ISPConfig DB server ID**. Set traffic quota and PHP version ID to
-the new product's intended settings. `server_php_id: 0` lets the API select the server default (or its first
+deliberately has `db_server_id: 0`: replace that with the real **new ISPConfig DB server ID**. Set the PHP version ID to
+the new product's intended setting; quotas follow the client automatically (see below). `server_php_id: 0` lets the API select the server default (or its first
 allowed PHP version if the default is hidden); this may differ from the old site. `db_host` is the address
 the **new website** uses for MySQL. The example grants remote access
 to both the web server (`10.20.30.21`) and phpMyAdmin on the panel (`10.20.30.20`).
 
-Since v1.2.3, website disk quota is automatic: the client's plan limit minus disk quotas already allocated to
-other websites, read from `/usage/summary?client_id=ID`. An unlimited plan produces `hd_quota: -1`; zero remaining
-quota stops the plan before provisioning. This calculation uses allocated quotas, not measured disk usage.
-The chosen MB value is displayed in the plan and refreshed before the create request. Client and reseller
-limits remain enforced by the API, including concurrent allocations. Resume and final sync keep the quota of
-the website already created by this migration.
+### Quotas and limits (automatic)
 
-The old `target.hd_quota_mb` setting is ignored. Leave existing configuration files unchanged when upgrading so
-the saved configuration fingerprint still matches. For example, an old value of `10240` with a fresh 5 GB
-account now creates the website with `5120` MB. `traffic_quota_mb` still configures traffic and must fit the
-account's traffic allowance. A disabled direct ISPConfig login (`canceled: true`, as configured by WHMCS) does
-not disable a client API key; a locked account remains subject to the API's write restrictions.
+Every quota follows the client's product allowance in the new ISPConfig, never a static configuration value.
+The plan reads `/usage/summary?client_id=ID` and uses the client's limit minus the quotas already allocated
+to other objects (allocated quotas, not measured usage):
+
+- website disk quota (`hd_quota`) and monthly traffic quota (`traffic_quota`);
+- database quota (`database_quota`): the unallocated database quota is split across the migrated databases in
+  proportion to their source size. With one database it receives the whole unallocated quota.
+
+An unlimited allowance produces `-1` (unlimited). Before the first write, the plan also measures the source
+(`du -sk` of `web` and `private` on the old web server, and `data_length + index_length` per source database,
+read-only) and stops when the website files or any database would not fit its quota, or when a count limit
+(websites, alias domains, subdomains, databases, database users) cannot fit the objects still to be created.
+A filled website quota would otherwise interrupt publishing, and ISPConfig restricts a database over its quota
+to read/delete access. The plan prints every chosen quota with the measured source size; values are refreshed
+before each create request. Client and reseller limits remain enforced by the API, including concurrent
+allocations. Resume and final sync keep the quotas of objects already created by this migration and repeat
+the size checks against them before copying new data.
+
+The old `target.hd_quota_mb` (ignored since v1.2.3) and `target.traffic_quota_mb` (ignored since v1.2.4)
+settings remain only for compatibility. Leave existing configuration files unchanged when upgrading so the
+saved configuration fingerprint still matches. A disabled direct ISPConfig login (`canceled: true`, as configured
+by WHMCS) does not disable a client API key; a locked account remains subject to the API's write restrictions.
 
 Use SSH aliases in `/root/.ssh/config` for custom ports/identity files. Every alias must log in as root with a
 key and have a host key verified through a trusted channel. Both SSH host verification and HTTPS verification
@@ -294,8 +306,13 @@ sources, rejection of public credential files and rejection of source imports. I
 with and without `server_php_id`, useful diagnostics for missing required columns, inventory,
 planning without remote writes, client-scoped provisioning calls, interrupted import recovery, binary data and
 views, WordPress edits without executing customer code, link conversion, ownership, backups, repeated runs and
-final sync. Its REST transport is a contract-shaped fake. `MigrationProvisioningTest` additionally uses the real
-API controllers, client keys and quota checks against a disposable SQLite schema: the 10 GB request fails for
-a 5 GB account, the Python-calculated quota succeeds, and an existing allocation reduces the new quota.
+final sync, plus the read-only source size measurement (`du` and `information_schema`). Its REST transport is a
+contract-shaped fake. `MigrationProvisioningTest` instead runs the shipped `preflight()`/`provision()` code through
+`tests/Migration/api_bridge.py` against the real API controllers, client keys and limit enforcement on a
+disposable SQLite schema: it reproduces the omitted database quota refusal of v1.2.3 and its resume, creates
+website, alias, database user and databases with every quota derived from the client (including a
+size-proportional database split and unlimited plans), and proves that count limits and source sizes that do not
+fit stop before any write. The 10 GB website request still fails for a 5 GB account and an existing allocation
+reduces the new quota.
 These tests are **not a live ISPConfig instance**. A first production migration must
 start with `plan` and an application test before DNS changes.
