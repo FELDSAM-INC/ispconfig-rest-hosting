@@ -11,6 +11,7 @@
     "api_url": "https://panel.example.net:8090/api/v1",
     "api_key_file": "/root/.config/ispcp-migrate/api-key",
     "web_ssh": "root@web.example.net",
+    "web_transport": "local",
     "web_server_id": 4,
     "db_ssh": "root@db.example.net",
     "db_server_id": 0,

@@ -17,7 +17,7 @@ and is never installed by the default worker selection. It requires **hosting v1
 On the REST panel, select the new web server (ID `4` in this deployment):
 
 ```bash
-sudo ispconfig-rest extension:update hosting --tag v1.2.1
+sudo ispconfig-rest extension:update hosting --tag v1.2.2
 sudo ispconfig-rest server-tools install --components migration --server 4
 ```
 
@@ -33,8 +33,9 @@ source and runs the installer on that web server. It installs:
 
 On the new web server, edit `/etc/ispconfig-rest-migration/config.json`: set the new DB server ID, intended quotas,
 PHP selection, source/destination SSH addresses and the administrator REST key file. The example already contains
-the `old-web.example.net → old-db.example.net` source route. Root SSH must use keys with verified host keys, including
-the connection back to the new web server itself. See the connection section below for the required accounts.
+the `old-web.example.net → old-db.example.net` source route. Since v1.2.2 the installed CLI accesses the destination web
+server locally, including checks, backups and publication; it does not need SSH access back to itself.
+Root SSH to the old servers and the destination DB server must use keys with verified host keys.
 
 Create a dedicated administrator REST key on the panel with `sudo ispconfig-rest key:create "website migrations"`.
 Store **only the resulting key** in the configured key file on the new web server, owned by root with mode 0600.
@@ -59,7 +60,9 @@ process is running. No cron entry, web endpoint or additional worker-table grant
 - Source database export: `mysqldump` on the old web server, with MySQL access from that host to the old DB
   server. Direct SSH to the old DB server is **not required** when using `source.db_via_web` (the example default).
   The optional direct mode uses root SSH, PHP CLI and `mysqldump` on each old DB server instead.
-- New web server: root SSH, Python 3, PHP CLI, rsync; standard `/var/www/clients/clientN/webN` layout.
+- New web server: run the installed command as root; Python 3, PHP CLI, rsync and the standard
+  `/var/www/clients/clientN/webN` layout. SSH from the panel is needed for installation/updates, but the
+  migration command itself accesses this web server locally.
 - New DB server: root SSH, PHP CLI with POSIX, `mysql`, `mysqldump`, `setpriv`, and the `nobody` account.
 - New panel: ispconfig-rest **v1.4.2+**, trusted HTTPS certificate and an administrator API key in a **0600** file.
   A temporary client-bound API key is created for provisioning, so client permissions and quotas still apply.
@@ -75,7 +78,20 @@ to both the web server (`10.20.30.21`) and phpMyAdmin on the panel (`10.20.30.20
 Use SSH aliases in `/root/.ssh/config` for custom ports/identity files. Every alias must log in as root with a
 key and have a host key verified through a trusted channel. Both SSH host verification and HTTPS verification
 are mandatory; the utility does not accept unknown keys or insecure TLS. It verifies the ISPConfig server ID
-on each SSH host before provisioning.
+on each SSH host and on the local destination web server before provisioning.
+
+### Destination web transport
+
+The installed `ispcp-migrate` command defaults to local destination access. Existing configuration files without
+`target.web_transport` need no change, even if `target.web_ssh` still names the new web server. The example
+explicitly sets `"web_transport": "local"`. Local mode requires root and checks that the local ISPConfig
+server ID matches `target.web_server_id`; a mismatch stops the plan before provisioning. File operations run
+as the website user, while private snapshots remain accessible only to the administrator.
+
+To run from a separate trusted administration host, set `"web_transport": "ssh"` and configure
+`target.web_ssh` with a verified host key. Standalone source-tree runs default to SSH when this setting is
+absent. Select the transport before starting a new migration; an existing installed-tool migration can
+continue with its original configuration and state after upgrading from v1.2.0/v1.2.1.
 
 ### Old database reachable only from the old web server
 
@@ -251,6 +267,9 @@ bash tests/Migration/integration.sh
 
 The integration test installs through the server-tools remote dispatcher, checks updates preserve settings/state,
 rejects concurrent updates and destination symlinks, and runs both source transports with real SSH, rsync, PHP and MariaDB.
+The web-mediated variant uses local destination file access with an unreachable destination SSH hostname,
+checks rejection of a wrong local ISPConfig server ID, and exercises backup, publication, recovery and final sync
+under the website user's privileges. The direct-source variant also covers remote destination access.
 The web-mediated variant checks TCP export with a limited SQL account, different web/DB server IDs, both credential
 sources, rejection of public credential files and rejection of source imports. It also checks source schemas
 with and without `server_php_id`, useful diagnostics for missing required columns, inventory,
