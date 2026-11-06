@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -218,6 +219,65 @@ $text = "DEFINER=root old_db";
             with self.assertRaises(m.MigrationError):
                 m.private_directory(directory)
 
+    def test_state_may_live_on_the_web_file_system_outside_website_roots(self):
+        with tempfile.TemporaryDirectory() as base:
+            base = Path(base).resolve()
+            with patch.object(m, 'WEB_ROOTS', (base / 'clients',)):
+                self.assertEqual(base / 'ispcp-migration/example.com', m.private_directory(base / 'ispcp-migration/example.com'))
+                with self.assertRaises(m.MigrationError):
+                    m.private_directory(base / 'clients/client6/web4/private/state')
+                (base / 'example.com').symlink_to(base / 'clients/client6/web4')
+                with self.assertRaises(m.MigrationError):
+                    m.private_directory(base / 'example.com/state')
+                shared = base / 'shared'
+                shared.mkdir(mode=0o700)
+                shared.chmod(0o777)  # another user could swap the state directory
+                with self.assertRaises(m.MigrationError):
+                    m.private_directory(shared / 'example.com')
+
+    def test_moving_state_dir_keeps_the_fingerprint(self):
+        config = {'source': {'panel_ssh': 'root@old', 'web_ssh': 'root@old', 'db_ssh': {'1': 'root@old'}},
+                  'target': {'api_url': 'https://panel.example/api/v1', 'api_key_file': '/unused', 'web_ssh': 'root@new',
+                             'db_ssh': 'root@db', 'web_server_id': 4, 'db_server_id': 5, 'db_host': 'db0'}}
+        with tempfile.TemporaryDirectory() as state, patch.object(m, 'Api', MagicMock()):
+            first = m.Migration(config, state, 'example.com', 6)
+            first.save()
+            moved = m.Migration(dict(config, state_dir='/var/www/ispcp-migration'), state, 'example.com', 6)
+            self.assertEqual(first.state['fingerprint'], moved.state['fingerprint'])
+            with self.assertRaisesRegex(m.MigrationError, 'Configuration/domain/client changed'):
+                m.Migration(dict(config, target=dict(config['target'], db_host='other')), state, 'example.com', 6)
+
+    def test_plan_stops_when_the_state_file_system_cannot_hold_the_staging_copy(self):
+        migration = self.migration(databases={'c57zana': 100 * 1048576})
+        with tempfile.TemporaryDirectory() as state:
+            migration.directory = Path(state)
+            migration.state.update(phase='planned', round=0)
+            usage = shutil.disk_usage(state)._replace(free=900 * 1048576)
+            with patch.object(m.shutil, 'disk_usage', return_value=usage):
+                with self.assertRaisesRegex(m.MigrationError, 'about 1256 MB needed, 900 MB free in .*state_dir'):
+                    migration.check_free_space()
+                # A final sync also backs up the target website.
+                migration.state['phase'] = 'copied'
+                with self.assertRaisesRegex(m.MigrationError, 'about 2056 MB needed'):
+                    migration.check_free_space()
+                migration.state['source_size']['web_bytes'] = 100 * 1048576
+                self.assertEqual((656 * 1048576, 900 * 1048576), migration.check_free_space())
+
+    def test_configured_state_dir_refuses_to_start_over_while_the_state_was_not_moved(self):
+        with tempfile.TemporaryDirectory() as base:
+            base = Path(base)
+            legacy, moved = base / 'legacy', base / 'moved'
+            (legacy / 'example.com').mkdir(parents=True, mode=0o700)
+            (legacy / 'example.com/state.json').write_text('{}')
+            config = base / 'config.json'
+            config.write_text(json.dumps({'state_dir': str(moved)}))
+            with patch.object(m, 'DEFAULT_STATE', legacy), patch.object(m.shutil, 'which', return_value='/usr/bin/x'), \
+                    patch('sys.stderr') as stderr:
+                self.assertEqual(1, m.main(['--simple', 'example.com', '6', '--config', str(config)]))
+            message = ''.join(call.args[0] for call in stderr.write.call_args_list)
+            self.assertIn('is still in %s/example.com. Move it first: mv' % legacy, message)
+            self.assertFalse(moved.exists(), 'no new empty state may be created')
+
     def test_remote_mysql_uses_web_ssh_identity_and_never_db_ssh(self):
         migration = object.__new__(m.Migration)
         connection = {'host': 'db0.feldhost.cz', 'port': 3306, 'defaults_file': '/root/reader.cnf'}
@@ -243,7 +303,12 @@ $text = "DEFINER=root old_db";
         args = m.parse_args(['--simple', 'Example.COM', '123'])
         self.assertEqual(('example.com', 123, 'interactive'), (args.domain, args.client_id, args.command))
         self.assertEqual('/etc/ispconfig-rest-migration/config.json', args.config)
-        self.assertEqual('/var/lib/ispconfig-rest-migration/example.com', args.state)
+        self.assertIsNone(args.state)  # state_dir/DOMAIN, derived once the configuration is read
+        self.assertEqual(Path('/var/lib/ispconfig-rest-migration'), m.state_root({}))
+        self.assertEqual(Path('/var/www/ispcp-migration'), m.state_root({'state_dir': '/var/www/ispcp-migration'}))
+        for value in ['relative', 7, '/x\n']:
+            with self.assertRaises(m.MigrationError):
+                m.state_root({'state_dir': value})
         self.assertEqual('plan', m.parse_args(['--simple', 'example.com', '123', '--plan']).command)
 
     def test_declining_simple_command_never_runs_or_publishes(self):

@@ -29,7 +29,7 @@ source and runs the installer on that web server. It installs:
 | `/usr/local/sbin/ispcp-migrate` | Command for the administrator |
 | `/usr/local/lib/ispconfig-rest-migration/` | Root-owned program and this guide |
 | `/etc/ispconfig-rest-migration/config.json` | Connection settings, configured once |
-| `/var/lib/ispconfig-rest-migration/DOMAIN/` | Private progress, SQL snapshots and backups for each site |
+| `/var/lib/ispconfig-rest-migration/DOMAIN/` | Private progress, staging copy, SQL snapshots and backups for each site (`state_dir` moves it) |
 
 On the new web server, edit `/etc/ispconfig-rest-migration/config.json`: set the new DB server ID,
 PHP selection, source/destination SSH addresses and the administrator REST key file. The example already contains
@@ -174,7 +174,26 @@ ispcp-migrate example.com 123
 
 `123` is the **new ISPConfig client ID**, not a WHMCS customer/service/server ID. Do not create the domain or
 DBs manually. The command uses the saved configuration and stores progress automatically under
-`/var/lib/ispconfig-rest-migration/example.com/`.
+`/var/lib/ispconfig-rest-migration/example.com/` (or `STATE_DIR/example.com/`, see below).
+
+### Staging space and `state_dir`
+
+Each round copies the source website into a private staging tree, backs up the target and keeps SQL snapshots,
+all in the site's state directory. The plan measures the source and stops before any write when that file
+system lacks about the website size plus twice the database size and 256 MB (a final sync also needs room for
+the target backup). When the root file system is small, put the state on the website file system, outside
+every website root, with a top-level `state_dir` in `/etc/ispconfig-rest-migration/config.json`:
+
+```bash
+mkdir -m 700 /var/www/ispcp-migration
+mv /var/lib/ispconfig-rest-migration/example.com /var/www/ispcp-migration/   # only for a started migration
+python3 -c 'import json; p="/etc/ispconfig-rest-migration/config.json"; c=json.load(open(p)); c["state_dir"]="/var/www/ispcp-migration"; open(p, "w").write(json.dumps(c, indent=2) + "\n")'
+```
+
+`state_dir` does not change the configuration fingerprint, so a started migration continues from the moved
+directory. The command refuses to start over while a migration's state is still in the old location. The state
+must stay root-only (mode 0700), not below `/var/www/clients`, `/var/www/html` or a `/var/www/DOMAIN` link.
+After the final copy is verified, older `round-NNN` directories can be deleted to recover space.
 
 It shows the source/destination plan first, then asks whether the old application's writes and scheduled jobs
 are stopped and the transfer should begin. Put the source in maintenance/read-only mode, stop queues, cron and
