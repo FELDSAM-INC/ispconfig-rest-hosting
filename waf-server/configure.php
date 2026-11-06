@@ -152,6 +152,9 @@ try {
         }
         $global = '';
         if ($engine === 'apache') {
+            // ModSecurity 2 adds every finding to the website's JSON audit log (the WHMCS WAF tab) whatever Apache's log
+            // level; only its error-log copy is dropped, so a website's error log, which customers read, keeps its own errors.
+            $base .= "\n# WAF findings are in the website's JSON audit log (/var/log/ispconfig-waf), not in its error log.\nLogLevel security2:crit\n";
             $base = preg_replace_callback('/^(SecPcreMatchLimit(?:Recursion)?|SecStatusEngine|SecUnicodeMapFile|SecTmpDir|SecDataDir)\s+.+$/m', function ($match) use (&$global) {
                 $global .= $match[0]."\n";
 
