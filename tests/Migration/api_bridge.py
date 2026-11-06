@@ -60,6 +60,8 @@ def main():
             migration.create = legacy
         try:
             try:
+                migration.php_version = request.get('php')
+                migration.select_php()
                 migration.preflight()
                 migration.provision()
             finally:

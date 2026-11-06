@@ -320,6 +320,22 @@ def database_quotas(summary, client_id, sizes):
     return {name: remaining * need // total for name, need in needs.items()}
 
 
+def php_configuration(rows, version, client_id):
+    """ID of the active PHP-FPM configuration of VERSION (e.g. 5.6) on the destination web server."""
+    require(isinstance(version, str) and re.fullmatch(r'[0-9]+\.[0-9]+', version), '--php takes a version such as 5.6 or 8.3')
+    pattern = re.compile(r'(?<![0-9.])' + re.escape(version) + r'(?![0-9])')
+    usable = [row for row in rows if row.get('active') in (True, 'y') and row.get('php_fpm_ini_dir')
+              and int(row.get('client_id') or 0) in (0, client_id)]
+    found = [row for row in usable
+             if any(pattern.search(str(row.get(field) or '')) for field in ('name', 'php_fpm_ini_dir', 'php_cli_binary'))]
+    names = sorted({str(row.get('name')) for row in usable})
+    require(found, 'PHP %s is not an active PHP-FPM version of the destination web server for this client (available: %s)'
+            % (version, ', '.join(names) or 'none'))
+    require(len(found) == 1, 'PHP %s matches several PHP configurations (IDs %s); remove the duplicate in ISPConfig'
+            % (version, ', '.join(str(row['id']) for row in found)))
+    return int(found[0]['id'])
+
+
 # Usage-summary count -> what the migration creates there.
 COUNT_LIMITS = {
     'web_domains': 'websites', 'web_alias_domains': 'alias domains', 'web_subdomains': 'subdomains',
@@ -383,6 +399,7 @@ class Migration:
         transport = self.target.get('web_transport', 'local' if HERE == INSTALLED_CODE else 'ssh')
         require(transport in ('local', 'ssh'), 'target.web_transport must be local or ssh')
         self.local_web = transport == 'local'
+        self.php_version = None  # --php VERSION of this migration
         self.directory = private_directory(state_dir)
         self.file = self.directory / 'state.json'
         self.domain = domain_name(domain)
@@ -430,6 +447,21 @@ class Migration:
             php_remote(self.target['web_ssh'], 'server-check.php')
         execute(argv, data=(json.dumps({'server_id': self.target['web_server_id']}) + '\n').encode(),
                 error_path=self.directory / 'server-check.log')
+
+    def select_php(self):
+        """PHP of the new website: --php VERSION, the version chosen by an earlier run, or target.server_php_id."""
+        site = self.state['objects'].get('site', {}).get('record')
+        if self.php_version:
+            rows = self.admin.all('/servers/%d/php-versions' % self.target['web_server_id'])
+            chosen = {'version': self.php_version, 'server_php_id': php_configuration(rows, self.php_version, self.client_id)}
+            if site is not None:
+                require(int(site.get('server_php_id') or 0) == chosen['server_php_id'],
+                        'The website was already created with PHP configuration ID %s; change its PHP version in '
+                        'ISPConfig or WHMCS, then repeat the command without --php.' % site.get('server_php_id'))
+            self.state['php'] = chosen
+        if site is not None:
+            return {'version': self.state.get('php', {}).get('version'), 'server_php_id': int(site.get('server_php_id') or 0)}
+        return self.state.get('php', {'version': None, 'server_php_id': self.target.get('server_php_id', 0)})
 
     def usage_summary(self):
         return self.admin.get('/usage/summary?client_id=' + str(self.client_id))
@@ -582,6 +614,7 @@ class Migration:
         self.state['inventory'] = inventory
         self.state['client_label'] = client.get('username', '')
         self.state['source_size'] = self.measure_source(inventory)
+        php = self.select_php()
         self.preflight()
         staging, free = self.check_free_space()
         quotas, sizes = self.state['quotas'], self.state['source_size']
@@ -590,7 +623,9 @@ class Migration:
             return 'unlimited' if value == -1 else '%d MB' % value
 
         print('PLAN: %s → ISPConfig client %s (%s)' % (self.domain, self.client_id, self.state['client_label']))
-        print('Web: %s:%s → %s; PHP configuration ID %s' % (self.source['web_ssh'], inventory['site']['document_root'], self.target['web_ssh'], self.target.get('server_php_id', 0)))
+        print('Web: %s:%s → %s' % (self.source['web_ssh'], inventory['site']['document_root'], self.target['web_ssh']))
+        print('PHP: ' + ('%s (configuration ID %d)' % (php['version'], php['server_php_id']) if php['version'] else
+                         'configuration ID %d' % php['server_php_id'] if php['server_php_id'] else 'server default'))
         print('Destination web access: ' + ('local (no SSH)' if self.local_web else 'SSH'))
         print('Website disk quota: %s (source files %d MB)' % (mb(quotas['disk_mb']), -(-sizes['web_bytes'] // MB)))
         print('Website traffic quota: ' + mb(quotas['traffic_mb']))
@@ -660,8 +695,9 @@ class Migration:
         }
         # Omitting a version permits the API's first allowed version when the
         # built-in default is hidden; explicitly submitting zero is rejected there.
-        if self.target.get('server_php_id', 0):
-            payload['server_php_id'] = self.target['server_php_id']
+        php_id = self.state.get('php', {}).get('server_php_id', self.target.get('server_php_id', 0))
+        if php_id:
+            payload['server_php_id'] = php_id
         site = self.create('site', '/sites/web-domains', payload)
         require(site['domain'] == self.domain and site['server_id'] == self.target['web_server_id']
                 and site['system_group'] == 'client' + str(self.client_id), 'Target website identity changed')
@@ -957,11 +993,13 @@ def parse_args(argv=None):
         actions.add_argument('--status', dest='command', action='store_const', const='status', help='Show saved progress')
         parser.add_argument('--config', default=DEFAULT_CONFIG, help='Connection settings (normally configured once)')
         parser.add_argument('--state', help='Existing state directory from a manual migration; normally state_dir/DOMAIN')
+        parser.add_argument('--php', metavar='VERSION', help='PHP version of the new website, e.g. 5.6 (default: target.server_php_id)')
         parser.set_defaults(command='interactive', source_quiesced=False, target_quiesced=False, config_reviewed=False)
         args = parser.parse_args(argv[1:])
         try:
             args.domain = domain_name(args.domain)
             require(args.client_id > 0, 'client ID must be positive')
+            require(args.php is None or re.fullmatch(r'[0-9]+\.[0-9]+', args.php), '--php takes a version such as 5.6 or 8.3')
         except (MigrationError, ValueError) as exc:
             parser.error(str(exc))
         return args
@@ -974,6 +1012,7 @@ def parse_args(argv=None):
     parser.add_argument('--source-quiesced', action='store_true', help='Confirm source application writes/cron are stopped')
     parser.add_argument('--target-quiesced', action='store_true', help='With sync: confirm target writes/cron are also stopped')
     parser.add_argument('--config-reviewed', action='store_true', help='With publish: manually patched staged non-WordPress configs')
+    parser.add_argument('--php', metavar='VERSION', help='With plan/run: PHP version of the new website, e.g. 5.6')
     return parser.parse_args(argv)
 
 
@@ -999,6 +1038,7 @@ def main(argv=None):
             except BlockingIOError:
                 raise MigrationError('Another process is using this migration state') from None
             migration = Migration(config, state_dir, args.domain, args.client_id)
+            migration.php_version = args.php
             if args.command == 'plan':
                 migration.plan()
             elif args.command == 'status':

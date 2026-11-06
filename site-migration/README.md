@@ -70,7 +70,7 @@ process is running. No cron entry, web endpoint or additional worker-table grant
 
 The installer creates a private configuration from `config.example.json` on first install. The example
 deliberately has `db_server_id: 0`: replace that with the real **new ISPConfig DB server ID**. Set the PHP version ID to
-the new product's intended setting; quotas follow the client automatically (see below). `server_php_id: 0` lets the API select the server default (or its first
+the new product's intended setting; quotas follow the client automatically (see below). `server_php_id` is the default when a migration has no `--php` (see below); `0` lets the API select the server default (or its first
 allowed PHP version if the default is hidden); this may differ from the old site. `db_host` is the address
 the **new website** uses for MySQL. The example grants remote access
 to both the web server (`10.20.30.21`) and phpMyAdmin on the panel (`10.20.30.20`).
@@ -175,6 +175,21 @@ ispcp-migrate example.com 123
 `123` is the **new ISPConfig client ID**, not a WHMCS customer/service/server ID. Do not create the domain or
 DBs manually. The command uses the saved configuration and stores progress automatically under
 `/var/lib/ispconfig-rest-migration/example.com/` (or `STATE_DIR/example.com/`, see below).
+
+### PHP version per migration
+
+```bash
+ispcp-migrate example.com 123 --php 5.6
+```
+
+`--php VERSION` selects the new website's PHP: the plan looks up the destination web server's PHP versions
+(`GET /servers/ID/php-versions`) and uses the single active PHP-FPM configuration of that version that is public
+or limited to this client, matched by its name (`PHP 5.6`) or FPM/CLI path (`/etc/php/5.6/fpm`). An unknown,
+inactive or ambiguous version stops the plan before any write and lists the usable versions. The plan prints
+the chosen version and configuration ID; the API still checks that the client may use it. The choice is saved, so
+resuming without `--php` keeps it. Without `--php`, `target.server_php_id` from the configuration applies. Once
+the website exists, change its PHP version in ISPConfig or WHMCS; a different `--php` then stops instead of
+silently diverging. Changing it in ISPConfig directly also works with the `php-limits` resource limits.
 
 ### Staging space and `state_dir`
 

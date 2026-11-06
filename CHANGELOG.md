@@ -5,6 +5,16 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.6] - 2026-11-06
+
+### Added
+
+- `ispcp-migrate DOMAIN CLIENT_ID --php 5.6` selects the new website's PHP version per migration. The plan resolves
+  it to the single active PHP-FPM configuration of the destination web server that the client may use (by name
+  or FPM/CLI path), prints it, and stops before any write for an unknown, inactive or ambiguous version. The choice
+  is kept on resume; without `--php`, `target.server_php_id` still applies. A `--php` differing from an already
+  created website stops instead of changing it.
+
 ## [1.2.5] - 2026-11-06
 
 ### Added
