@@ -5,6 +5,8 @@ on:
     branches: [main, develop]
     tags: ['v*']
   pull_request:
+  # Started by crs-update.yml: pushes with the workflow token do not trigger push events.
+  workflow_dispatch:
 
 permissions:
   contents: read

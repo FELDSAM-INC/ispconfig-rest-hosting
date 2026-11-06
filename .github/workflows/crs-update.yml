@@ -1,0 +1,89 @@
+name: crs-update
+
+# Weekly (spec 047): move waf-server/crs.json to the newest signed release of its OWASP CRS LTS line, check it on the
+# native Apache and nginx engines, commit it to develop, run the tests there and open an issue to release it.
+# Scheduled workflows run from the default branch (main), so this starts with the release that contains it.
+on:
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: crs-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      - name: Newest signed release of the pinned CRS line
+        id: crs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          version=$(php tools/crs-update.php)
+          status=$?
+          set -e
+          case "$status" in
+            0) echo "version=$version" >> "$GITHUB_OUTPUT"; echo "New release: OWASP CRS $version";;
+            3) echo "$version"; echo "version=" >> "$GITHUB_OUTPUT";;
+            *) exit 1;;
+          esac
+
+      - name: Check out ispconfig-rest for the installer checks
+        if: steps.crs.outputs.version != ''
+        uses: actions/checkout@v4
+        with:
+          repository: FELDSAM-INC/ispconfig-rest
+          ref: develop
+          path: core
+          persist-credentials: false
+
+      - name: Native Apache and nginx checks with the new release
+        if: steps.crs.outputs.version != ''
+        run: |
+          docker build -q -t ispcp-waf-test tests/Integration/waf
+          for engine in apache nginx; do
+            docker run --rm -v "$PWD:/app:ro" -w /app ispcp-waf-test bash tests/Integration/waf/check.sh "$engine"
+            docker run --rm -v "$PWD:/app:ro" -v "$PWD/core:/core:ro" -e ISPCONFIG_REST_DIR=/core -w /app ispcp-waf-test bash tests/Integration/waf/install.sh "$engine"
+          done
+
+      - name: Commit to develop and ask for a release
+        if: steps.crs.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.crs.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          version = os.environ['VERSION']
+          changelog = Path('CHANGELOG.md')
+          text = changelog.read_text()
+          entry = ('## [Unreleased]\n\n### Security\n\n- OWASP CRS ' + version + ' (LTS), see its [release notes]'
+                   '(https://github.com/coreruleset/coreruleset/releases/tag/v' + version + '). Web servers get it with\n'
+                   '  `ispconfig-rest server-tools update --components waf --yes`.\n')
+          if text.count('## [Unreleased]\n') != 1:
+              raise SystemExit('CHANGELOG.md needs exactly one [Unreleased] section.')
+          changelog.write_text(text.replace('## [Unreleased]\n', entry, 1))
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add waf-server/crs.json CHANGELOG.md
+          git commit -s -m "Use OWASP CRS $VERSION" -m "Newest signed release of the pinned LTS line, checked on the native Apache and nginx engines by crs-update.yml."
+          git push origin HEAD:develop
+          gh workflow run tests.yml --ref develop
+          gh issue create --title "OWASP CRS $VERSION is ready to release" --body "crs-update.yml moved \`waf-server/crs.json\` to OWASP CRS $VERSION on \`develop\` (signature of the pinned CRS release key verified, native Apache and nginx checks passed): https://github.com/coreruleset/coreruleset/releases/tag/v$VERSION
+
+          Release it as a hosting patch release, then on the panel run \`ispconfig-rest extension:update hosting --tag vX.Y.Z && ispconfig-rest server-tools update --components waf --yes\` (or pin the release in ispconfig-ansible)."
