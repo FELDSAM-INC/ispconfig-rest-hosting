@@ -229,6 +229,40 @@ PY;
         $this->assertSame(-1, (int) DB::table('web_database')->value('database_quota'));
     }
 
+    private function phpVersions(): array
+    {
+        $ids = [];
+        foreach ([['PHP 5.6', '5.6', 'y', 0], ['PHP 8.3', '8.3', 'y', 0], ['PHP 7.4', '7.4', 'n', 0], ['PHP 8.1', '8.1', 'y', 999]] as [$name, $version, $active, $client]) {
+            $ids[$version] = (int) DB::table('server_php')->insertGetId([
+                'server_id' => 1, 'client_id' => $client, 'name' => $name, 'active' => $active,
+                'php_fpm_init_script' => 'php'.$version.'-fpm', 'php_fpm_ini_dir' => '/etc/php/'.$version.'/fpm',
+                'php_fpm_pool_dir' => '/etc/php/'.$version.'/fpm/pool.d', 'php_fpm_socket_dir' => '/run/php',
+                'php_cli_binary' => '/usr/bin/php'.$version,
+            ], 'server_php_id');
+        }
+
+        return $ids;
+    }
+
+    public function test_php_option_selects_the_destination_servers_php_version(): void
+    {
+        $ids = $this->phpVersions();
+        [$result, $calls] = $this->runMigration($this->migration(['c57zana' => 40 * self::MB], ['php' => '5.6']));
+        $this->assertTrue($result['ok'], $result['error'] ?? '');
+        $this->assertSame(['version' => '5.6', 'server_php_id' => $ids['5.6']], $result['state']['php']);
+        $this->assertSame($ids['5.6'], (int) DB::table('web_domain')->where('type', 'vhost')->value('server_php_id'));
+        $this->assertSame('php-fpm', DB::table('web_domain')->where('type', 'vhost')->value('php'));
+
+        // Inactive, other clients' and unknown versions stop before any write and name the usable ones.
+        foreach (['7.4', '8.1', '9.9'] as $version) {
+            DB::table('web_domain')->delete();
+            [$refused, $calls] = $this->runMigration($this->migration(['c57zana' => 40 * self::MB], ['php' => $version]));
+            $this->assertFalse($refused['ok'], $version);
+            $this->assertSame('PHP '.$version.' is not an active PHP-FPM version of the destination web server for this client (available: PHP 5.6, PHP 8.3)', $refused['error']);
+            $this->assertSame([], $this->writes($calls), $version);
+        }
+    }
+
     public function test_limits_that_cannot_fit_the_migration_stop_before_any_write(): void
     {
         $cases = [

@@ -278,6 +278,40 @@ $text = "DEFINER=root old_db";
             self.assertIn('is still in %s/example.com. Move it first: mv' % legacy, message)
             self.assertFalse(moved.exists(), 'no new empty state may be created')
 
+    def test_php_version_resolves_to_one_active_fpm_configuration(self):
+        rows = [{'id': 2, 'name': 'PHP 5.6', 'active': True, 'client_id': 0, 'php_fpm_ini_dir': '/etc/php/5.6/fpm'},
+                {'id': 3, 'name': 'PHP 8.3', 'active': True, 'client_id': 0, 'php_fpm_ini_dir': '/etc/php/8.3/fpm'},
+                {'id': 4, 'name': 'Legacy', 'active': True, 'client_id': 0, 'php_fpm_ini_dir': '/etc/php/5.3/fpm'},
+                {'id': 5, 'name': 'PHP 7.4', 'active': False, 'client_id': 0, 'php_fpm_ini_dir': '/etc/php/7.4/fpm'},
+                {'id': 6, 'name': 'PHP 8.1', 'active': True, 'client_id': 9, 'php_fpm_ini_dir': '/etc/php/8.1/fpm'},
+                {'id': 7, 'name': 'PHP 8.2 CGI', 'active': True, 'client_id': 0, 'php_fpm_ini_dir': ''}]
+        self.assertEqual(2, m.php_configuration(rows, '5.6', 6))
+        self.assertEqual(3, m.php_configuration(rows, '8.3', 6))
+        self.assertEqual(4, m.php_configuration(rows, '5.3', 6))  # found by its FPM path
+        self.assertEqual(6, m.php_configuration(rows, '8.1', 9))
+        for version in ['7.4', '8.1', '8.2', '8', '5.6;id', '15.6']:
+            with self.subTest(version=version), self.assertRaises(m.MigrationError):
+                m.php_configuration(rows, version, 6)
+        with self.assertRaisesRegex(m.MigrationError, 'IDs 2, 8'):
+            m.php_configuration(rows + [dict(rows[0], id=8)], '5.6', 6)
+        with self.assertRaises(SystemExit), patch('sys.stderr'):
+            m.parse_args(['--simple', 'example.com', '6', '--php', 'latest'])
+        self.assertEqual('5.6', m.parse_args(['--simple', 'example.com', '6', '--php=5.6']).php)
+
+    def test_php_option_cannot_silently_differ_from_an_existing_website(self):
+        migration = self.migration({'site': {'record': {'hd_quota': 5120, 'server_php_id': 14}}})
+        migration.target = {'web_server_id': 4}
+        migration.admin = MagicMock()
+        migration.admin.all.return_value = [{'id': 14, 'name': 'PHP 8.3', 'active': True, 'client_id': 0, 'php_fpm_ini_dir': '/x'},
+                                            {'id': 2, 'name': 'PHP 5.6', 'active': True, 'client_id': 0, 'php_fpm_ini_dir': '/y'}]
+        migration.php_version = '8.3'
+        self.assertEqual({'version': '8.3', 'server_php_id': 14}, migration.select_php())
+        migration.php_version = '5.6'
+        with self.assertRaisesRegex(m.MigrationError, 'already created with PHP configuration ID 14'):
+            migration.select_php()
+        migration.php_version = None
+        self.assertEqual(14, migration.select_php()['server_php_id'])
+
     def test_remote_mysql_uses_web_ssh_identity_and_never_db_ssh(self):
         migration = object.__new__(m.Migration)
         connection = {'host': 'db0.feldhost.cz', 'port': 3306, 'defaults_file': '/root/reader.cnf'}
