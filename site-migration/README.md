@@ -17,7 +17,7 @@ and is never installed by the default worker selection. It requires **hosting v1
 On the REST panel, select the new web server (ID `4` in this deployment):
 
 ```bash
-sudo ispconfig-rest extension:update hosting --tag v1.2.0
+sudo ispconfig-rest extension:update hosting --tag v1.2.1
 sudo ispconfig-rest server-tools install --components migration --server 4
 ```
 
@@ -54,6 +54,7 @@ process is running. No cron entry, web endpoint or additional worker-table grant
 
 - Local host: Python **3.9+**, PHP **7.4+**, OpenSSH client and a current, security-patched rsync.
 - Old panel: root SSH, PHP CLI with mysqli, OpenSSL and POSIX, standard ISPConfig server configuration.
+  Use hosting v1.2.1+ for source schemas without `web_domain.server_php_id`; destination PHP selection is configured separately.
 - Old web server: root SSH, PHP CLI and rsync **3.0+** (`--protect-args`).
 - Source database export: `mysqldump` on the old web server, with MySQL access from that host to the old DB
   server. Direct SSH to the old DB server is **not required** when using `source.db_via_web` (the example default).
@@ -235,6 +236,12 @@ Errors containing customer SQL remain in private `database.log`. Other connectio
 `source-inventory.log`, `server-check.log`, `target-files.log` and `rsync.log`. Do not paste private state,
 database mappings, SQL dumps or application configurations into tickets/chat.
 
+Since v1.2.1, inventory query errors include their section and MySQL error code/message, for example
+`[databases] (MySQL 1054): Unknown column ...`. Missing required columns or tables stop the plan before
+destination provisioning. The optional source `server_php_id` column is detected automatically; its absence
+does not require changing the old database schema. An SSH post-quantum key-exchange warning is separate
+from SQL inventory failures.
+
 ## Validation
 
 ```bash
@@ -245,7 +252,8 @@ bash tests/Migration/integration.sh
 The integration test installs through the server-tools remote dispatcher, checks updates preserve settings/state,
 rejects concurrent updates and destination symlinks, and runs both source transports with real SSH, rsync, PHP and MariaDB.
 The web-mediated variant checks TCP export with a limited SQL account, different web/DB server IDs, both credential
-sources, rejection of public credential files and rejection of source imports. It also checks inventory,
+sources, rejection of public credential files and rejection of source imports. It also checks source schemas
+with and without `server_php_id`, useful diagnostics for missing required columns, inventory,
 planning without remote writes, client-scoped provisioning calls, interrupted import recovery, binary data and
 views, WordPress edits without executing customer code, link conversion, ownership, backups, repeated runs and
 final sync. REST is a contract-shaped fake, **not a live ISPConfig instance**. A first production migration must

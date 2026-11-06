@@ -5,6 +5,21 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-06
+
+### Fixed
+
+- Migration inventory accepts source `web_domain` tables without `server_php_id`. Newer sources retain their
+  existing inventory value; the destination PHP selection still comes from the migration configuration.
+- Failed source inventory queries identify the query section and MySQL error instead of reporting only
+  `Source inventory query failed`. Connection failures report an error code without credential-bearing traces.
+
+### Upgrade notes
+
+- Update the hosting extension, then refresh the installed CLI from the panel:
+  `sudo ispconfig-rest server-tools update --components migration --server ID`.
+  Existing configuration and migration progress are preserved.
+
 ## [1.2.0] - 2026-11-06
 
 ### Added

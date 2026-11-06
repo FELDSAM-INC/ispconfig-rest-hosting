@@ -178,6 +178,9 @@ def main():
     }
     mode = os.environ.get('ISPCP_TEST_SOURCE_MODE', 'direct')
     if mode == 'via-web':
+        # An old ISPConfig schema lacks this newer column; exercise the entire
+        # migration against it, not just a mocked inventory response.
+        sql('ALTER TABLE dbispconfig.web_domain DROP COLUMN server_php_id;')
         # DB server identity intentionally differs from the SSH web host. The SQL
         # connection uses TCP from web; the DB host is never an SSH destination.
         sql("UPDATE dbispconfig.web_database SET server_id=2; INSERT INTO dbispconfig.server VALUES(2,'db-only.invalid');")
@@ -192,6 +195,8 @@ def main():
         credential_file.chmod(0o600)
         del config['source']['db_ssh']
         config['source']['db_via_web'] = {'host': '127.0.0.1', 'port': 3306, 'defaults_file': str(credential_file)}
+    else:
+        sql('UPDATE dbispconfig.web_domain SET server_php_id=17 WHERE domain_id=4;')
     # Check the remote PHP helper's inventory before substituting REST.
     m.Api = FakeApi
     with tempfile.TemporaryDirectory(prefix='migration-test-') as state:
@@ -199,6 +204,16 @@ def main():
         migration.plan()
         assert FakeApi.posts == 0
         assert 'old_db' in (Path(state) / 'inventory.json').read_text()
+        assert migration.state['inventory']['site']['server_php_id'] == ('0' if mode == 'via-web' else '17')
+        # A genuine schema error must identify its query and MySQL cause on
+        # stderr, with no partial JSON and no exception trace containing config.
+        sql('ALTER TABLE dbispconfig.web_database CHANGE database_charset charset_fixture VARCHAR(20);')
+        inventory_command = m.php_remote(config['source']['panel_ssh'], 'source-inventory.php')
+        failure = subprocess.run(inventory_command, input=b'{"domain":"example.test"}\n', capture_output=True)
+        assert failure.returncode != 0 and failure.stdout == b''
+        assert b'Source inventory query failed [databases] (MySQL 1054)' in failure.stderr
+        assert b'database_charset' in failure.stderr and b'Stack trace' not in failure.stderr
+        sql('ALTER TABLE dbispconfig.web_database CHANGE charset_fixture database_charset VARCHAR(20);')
         if mode == 'via-web':
             route_host, route = migration.source_database_route(migration.state['inventory']['databases'][0])
             assert route_host == config['source']['web_ssh'] and route['server_id'] == '1'
