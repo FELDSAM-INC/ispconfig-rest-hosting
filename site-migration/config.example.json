@@ -11,6 +11,7 @@
     "api_url": "https://panel0.nova.feldhost.cz:8090/api/v1",
     "api_key_file": "/root/.config/ispcp-migrate/api-key",
     "web_ssh": "root@web0.nova.feldhost.cz",
+    "web_transport": "local",
     "web_server_id": 4,
     "db_ssh": "root@db0.nova.feldhost.cz",
     "db_server_id": 0,

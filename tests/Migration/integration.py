@@ -178,6 +178,9 @@ def main():
     }
     mode = os.environ.get('ISPCP_TEST_SOURCE_MODE', 'direct')
     if mode == 'via-web':
+        # Installed CLI defaults to local target access even with an unchanged
+        # legacy web_ssh setting. This address has no DNS/SSH setup in the fixture.
+        config['target']['web_ssh'] = 'root@target-no-ssh.invalid'
         # An old ISPConfig schema lacks this newer column; exercise the entire
         # migration against it, not just a mocked inventory response.
         sql('ALTER TABLE dbispconfig.web_domain DROP COLUMN server_php_id;')
@@ -196,11 +199,23 @@ def main():
         del config['source']['db_ssh']
         config['source']['db_via_web'] = {'host': '127.0.0.1', 'port': 3306, 'defaults_file': str(credential_file)}
     else:
+        config['target']['web_transport'] = 'ssh'
         sql('UPDATE dbispconfig.web_domain SET server_php_id=17 WHERE domain_id=4;')
     # Check the remote PHP helper's inventory before substituting REST.
     m.Api = FakeApi
     with tempfile.TemporaryDirectory(prefix='migration-test-') as state:
         migration = m.Migration(config, state, 'example.test', 3)
+        assert migration.local_web == (mode == 'via-web')
+        if mode == 'via-web':
+            # A mistaken local destination must fail before provisioning anything.
+            (config_dir / 'config.inc.php').write_text("<?php $conf=array('server_id'=>99);")
+            try:
+                migration.check_web_server()
+            except m.MigrationError:
+                pass
+            else:
+                raise AssertionError('wrong local ISPConfig server accepted')
+            (config_dir / 'config.inc.php').write_text("<?php $conf=array('server_id'=>1,'db_host'=>'localhost','db_user'=>'root','db_password'=>'','db_database'=>'dbispconfig');")
         migration.plan()
         assert FakeApi.posts == 0
         assert 'old_db' in (Path(state) / 'inventory.json').read_text()

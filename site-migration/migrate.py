@@ -26,14 +26,15 @@ import urllib.parse
 import urllib.request
 
 HERE = Path(__file__).resolve().parent
+INSTALLED_CODE = Path('/usr/local/lib/ispconfig-rest-migration')
 DEFAULT_CONFIG = '/etc/ispconfig-rest-migration/config.json'
 DEFAULT_STATE = Path('/var/lib/ispconfig-rest-migration')
 SSH = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
        '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no',
        '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes',
        '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3']
-RSYNC = ['rsync', '-rlpt', '--links', '--no-devices', '--no-specials', '--checksum',
-         '--protect-args', '-e', shlex.join(SSH)]
+RSYNC_BASE = ['rsync', '-rlpt', '--links', '--no-devices', '--no-specials', '--checksum', '--protect-args']
+RSYNC = RSYNC_BASE + ['-e', shlex.join(SSH)]
 
 
 class MigrationError(Exception):
@@ -237,6 +238,11 @@ class Migration:
         self.config = config
         self.source = config['source']
         self.target = config['target']
+        # server-tools installs this CLI on the destination web server. Keep
+        # existing config/state unchanged while removing the self-SSH dependency.
+        transport = self.target.get('web_transport', 'local' if HERE == INSTALLED_CODE else 'ssh')
+        require(transport in ('local', 'ssh'), 'target.web_transport must be local or ssh')
+        self.local_web = transport == 'local'
         self.directory = private_directory(state_dir)
         self.file = self.directory / 'state.json'
         self.domain = domain_name(domain)
@@ -274,6 +280,15 @@ class Migration:
     def save(self):
         atomic_json(self.file, self.state)
 
+    def web_command(self, argv):
+        return argv if self.local_web else remote(self.target['web_ssh'], argv)
+
+    def check_web_server(self):
+        argv = ['php', '-d', 'display_errors=stderr', str(HERE / 'server-check.php')] if self.local_web else \
+            php_remote(self.target['web_ssh'], 'server-check.php')
+        execute(argv, data=(json.dumps({'server_id': self.target['web_server_id']}) + '\n').encode(),
+                error_path=self.directory / 'server-check.log')
+
     def source_database_route(self, database, inventory=None):
         inventory = inventory or self.state['inventory']
         if 'db_via_web' in self.source:
@@ -297,8 +312,8 @@ class Migration:
         atomic_json(self.directory / 'inventory.json', inventory)
         validate_inventory(inventory, self.domain)
         routes = [self.source_database_route(db, inventory) for db in inventory['databases']]
+        self.check_web_server()
         for host, server_id in [(self.source['web_ssh'], inventory['site']['server_id']),
-                                (self.target['web_ssh'], self.target['web_server_id']),
                                 (self.target['db_ssh'], self.target['db_server_id'])] + [
                                     (host, request['server_id']) for host, request in routes]:
             execute(php_remote(host, 'server-check.php'), data=(json.dumps({'server_id': server_id}) + '\n').encode(),
@@ -320,6 +335,7 @@ class Migration:
         self.save()
         print('PLAN: %s → ISPConfig client %s (%s)' % (self.domain, self.client_id, self.state['client_label']))
         print('Web: %s:%s → %s; PHP configuration ID %s' % (self.source['web_ssh'], inventory['site']['document_root'], self.target['web_ssh'], self.target.get('server_php_id', 0)))
+        print('Destination web access: ' + ('local (no SSH)' if self.local_web else 'SSH'))
         print('Databases: ' + (', '.join(db['database_name'] for db in inventory['databases']) or '(none)'))
         if 'db_via_web' in self.source:
             connection = self.source['db_via_web']
@@ -427,12 +443,24 @@ class Migration:
         atomic_json(self.directory / 'database-map.json', self.state['databases'])
 
     def files_command(self):
+        identity = json.dumps({field: self.site[field] for field in ('document_root', 'system_user', 'system_group')})
+        if self.local_web:
+            return ['python3', str(HERE / 'target-files.py'), identity]
         code = base64.b64encode((HERE / 'target-files.py').read_bytes()).decode()
         # Source is administrator-controlled and encoded before passing through ssh/rsync shells.
-        return ['python3', '-c', 'import base64;exec(base64.b64decode("' + code + '"))', json.dumps(self.site)]
+        return ['python3', '-c', 'import base64;exec(base64.b64decode("' + code + '"))', identity]
+
+    def target_rsync(self):
+        if self.local_web:
+            # Keep rsync's separate sender/receiver processes so the website side
+            # drops privilege while the administrator side can read private state.
+            # The transport executes our local helper directly, with no SSH/socket.
+            return RSYNC_BASE + ['-e', shlex.join(self.files_command() + ['--local-rsync'])], 'local:'
+        return RSYNC + ['--rsync-path=' + shlex.join(self.files_command())], self.target['web_ssh'] + ':'
 
     def check_target(self):
-        execute(remote(self.target['web_ssh'], self.files_command()), error_path=self.directory / 'target-files.log')
+        self.check_web_server()
+        execute(self.web_command(self.files_command()), error_path=self.directory / 'target-files.log')
 
     @staticmethod
     def credentials(db):
@@ -478,10 +506,10 @@ class Migration:
             return
         backup = round_dir / 'before'
         backup.mkdir(mode=0o700, exist_ok=True)
+        transfer, target = self.target_rsync()
         for folder in ('web', 'private'):
             (backup / folder).mkdir(exist_ok=True)
-            execute(RSYNC + ['--rsync-path=' + shlex.join(self.files_command()),
-                            self.target['web_ssh'] + ':' + self.site['document_root'] + '/' + folder + '/',
+            execute(transfer + [target + self.site['document_root'] + '/' + folder + '/',
                             str(backup / folder) + '/'], error_path=self.directory / 'rsync.log')
         for key, db in self.state['databases'].items():
             # Binary stdout goes to a file, never the terminal. Compress after successful dump.
@@ -568,11 +596,11 @@ class Migration:
         tree = self.directory / ('round-%03d' % self.state['round']) / 'tree'
         normalize_links(tree, self.state['inventory']['site']['document_root'])
         # Credential configurations MUST have been patched in the private staging tree first.
+        transfer, target = self.target_rsync()
         for folder in ('private', 'web'):
             mode = 'Du=rwx,Dgo=,Fu=rw,Fgo=' if folder == 'private' else 'Du=rwx,Dgo=rx,Fu=rw,Fgo=r'
-            execute(RSYNC + ['--chmod=' + mode, '--delete-delay', '--exclude=/.well-known/acme-challenge/',
-                            '--rsync-path=' + shlex.join(self.files_command()), str(tree / folder) + '/',
-                            self.target['web_ssh'] + ':' + self.site['document_root'] + '/' + folder + '/'],
+            execute(transfer + ['--chmod=' + mode, '--delete-delay', '--exclude=/.well-known/acme-challenge/',
+                            str(tree / folder) + '/', target + self.site['document_root'] + '/' + folder + '/'],
                     error_path=self.directory / 'rsync.log')
         self.state['phase'] = 'copied'
         self.save()

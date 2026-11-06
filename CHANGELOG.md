@@ -5,6 +5,22 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-06
+
+### Fixed
+
+- The installed migration CLI accesses its destination web server locally instead of connecting back to itself
+  over SSH. Website checks, backups and file publication no longer need a self-SSH key or known-host entry.
+  Local ISPConfig server identity is checked and filesystem transfers still drop to the website user's privileges.
+- Existing installed-tool configuration and migration state work unchanged. Administrators running from a
+  separate host can explicitly select `target.web_transport: "ssh"`; standalone source-tree runs retain SSH
+  as their default. Source and database SSH connections keep strict host-key verification.
+
+### Upgrade notes
+
+- Update hosting, then run `sudo ispconfig-rest server-tools update --components migration --server ID` on the
+  panel. Continue the original command on the destination web server without editing configuration or state.
+
 ## [1.2.1] - 2026-11-06
 
 ### Fixed
