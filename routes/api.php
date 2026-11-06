@@ -25,6 +25,7 @@ Route::middleware(['api', 'api.key', 'change.set'])->prefix('api/v1')->group(fun
     Route::post('sites/web-domains/{webDomain}/wordpress/jobs', [WordPressController::class, 'store'])->whereNumber('webDomain');
     Route::get('sites/web-domains/{webDomain}/wordpress/jobs/{job}', [WordPressController::class, 'job'])->whereNumber('webDomain')->whereUuid('job');
     Route::get('sites/web-domains/{webDomain}/waf/events', [WebWafController::class, 'index'])->whereNumber('webDomain');
+    Route::get('sites/web-domains/{webDomain}/waf/clients', [WebWafController::class, 'clients'])->whereNumber('webDomain');
     Route::get('sites/web-domains/{webDomain}/waf', [WebWafController::class, 'show'])->whereNumber('webDomain');
     Route::put('sites/web-domains/{webDomain}/waf', [WebWafController::class, 'update'])->whereNumber('webDomain');
 

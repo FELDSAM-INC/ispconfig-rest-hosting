@@ -1,0 +1,27 @@
+# Managed by the ISPConfig REST WAF installer (spec 048); replaced by updates. The root WAF worker decides and writes
+# /var/log/ispconfig-waf/bans.log; these jails only enforce its decisions on HTTP and HTTPS of this server.
+# Never-banned addresses belong in /etc/ispconfig-waf/ban-ignore.conf or a website's WAF IP allowlist.
+[ispconfig-waf]
+enabled = true
+filter = ispconfig-waf
+logpath = /var/log/ispconfig-waf/bans.log
+backend = auto
+usedns = no
+port = http,https
+protocol = tcp
+maxretry = 1
+findtime = 600
+bantime = 3600
+
+# The third ban of a client within a day (reason=repeat).
+[ispconfig-waf-recidive]
+enabled = true
+filter = ispconfig-waf-recidive
+logpath = /var/log/ispconfig-waf/bans.log
+backend = auto
+usedns = no
+port = http,https
+protocol = tcp
+maxretry = 1
+findtime = 600
+bantime = 604800

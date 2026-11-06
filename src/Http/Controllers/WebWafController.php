@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use IspconfigRestHosting\Http\Requests\UpdateWebWafRequest;
 use IspconfigRestHosting\Services\WebWafService;
+use IspconfigRestHosting\Support\WebWafBans;
 
 final class WebWafController extends Controller
 {
@@ -39,8 +40,34 @@ final class WebWafController extends Controller
     public function index(Request $request, WebDomain $webDomain, WebWafService $waf): JsonResponse
     {
         $filters = $request->validate(['limit' => ['sometimes', 'integer', 'min:1', 'max:100'], 'offset' => ['sometimes', 'integer', 'min:0', 'max:10000'],
-            'outcome' => ['sometimes', Rule::in(['blocked', 'detected'])], 'rule_id' => ['sometimes', 'integer', 'min:1', 'max:2147483647']]);
+            'outcome' => ['sometimes', Rule::in(['blocked', 'detected'])], 'rule_id' => ['sometimes', 'integer', 'min:1', 'max:2147483647']] + self::clientRules());
 
-        return response()->json($waf->events($webDomain, $filters), 200, ['Cache-Control' => 'private, no-store']);
+        return response()->json($waf->events($webDomain, self::clientFilters($filters)), 200, ['Cache-Control' => 'private, no-store']);
+    }
+
+    public function clients(Request $request, WebDomain $webDomain, WebWafService $waf): JsonResponse
+    {
+        $filters = $request->validate(['limit' => ['sometimes', 'integer', 'min:1', 'max:100'], 'offset' => ['sometimes', 'integer', 'min:0', 'max:10000']] + self::clientRules());
+
+        return response()->json($waf->clients($webDomain, self::clientFilters($filters)), 200, ['Cache-Control' => 'private, no-store']);
+    }
+
+    /** `client_ip`: an address or CIDR block; `banned`: true/false/1/0 (spec 048). */
+    private static function clientRules(): array
+    {
+        return ['client_ip' => ['sometimes', 'string', 'max:49', function (string $attribute, mixed $value, \Closure $fail): void {
+            if (! is_string($value) || WebWafBans::block($value) === null) {
+                $fail('Use an IP address or a CIDR block.');
+            }
+        }], 'banned' => ['sometimes', Rule::in(['true', 'false', '1', '0', true, false, 1, 0])]];
+    }
+
+    private static function clientFilters(array $filters): array
+    {
+        if (array_key_exists('banned', $filters)) {
+            $filters['banned'] = in_array($filters['banned'], ['true', '1', true, 1], true);
+        }
+
+        return $filters;
     }
 }

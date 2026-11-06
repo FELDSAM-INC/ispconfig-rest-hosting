@@ -43,8 +43,30 @@
       - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 10000, default: 0}}
       - {name: outcome, in: query, schema: {type: string, enum: [blocked, detected]}}
       - {name: rule_id, in: query, schema: {type: integer, minimum: 1, maximum: 2147483647}}
+      - {name: client_ip, in: query, description: Only events of this client address or CIDR block (IPv4 or IPv6)., schema: {type: string, maxLength: 49}}
+      - {name: banned, in: query, description: Only events of clients the website's server currently bans (true) or does not ban (false)., schema: {type: string, enum: ['true', 'false', '1', '0']}}
     responses:
       '200': {description: Event page, content: {application/json: {schema: {$ref: '../../components/schemas/WebWafEvents.yaml'}}}}
+      '401': {$ref: '../../components/responses/Unauthorized.yaml'}
+      '404': {$ref: '../../components/responses/NotFound.yaml'}
+      '422': {$ref: '../../components/responses/UnprocessableEntity.yaml'}
+/sites/web-domains/{id}/waf/clients:
+  get:
+    tags: [Web Domains]
+    summary: Read the WAF clients of a website with their totals and bans
+    description: |
+      Clients whose requests matched WAF rules on this website in the last 7 days, most requests first; private/no-store.
+      Totals count every collected event and request, also those beyond the 100 events kept per client. `ban` is the
+      current fail2ban ban of the website's server (spec 048): `attack` (requests over the anomaly threshold), `scan`
+      (scanner, protocol or restricted-file rules on many paths) or `repeat` (third ban within a day).
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: integer, minimum: 1}}
+      - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 50}}
+      - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 10000, default: 0}}
+      - {name: client_ip, in: query, description: Only this client address or CIDR block., schema: {type: string, maxLength: 49}}
+      - {name: banned, in: query, schema: {type: string, enum: ['true', 'false', '1', '0']}}
+    responses:
+      '200': {description: Client page, content: {application/json: {schema: {$ref: '../../components/schemas/WebWafClients.yaml'}}}}
       '401': {$ref: '../../components/responses/Unauthorized.yaml'}
       '404': {$ref: '../../components/responses/NotFound.yaml'}
       '422': {$ref: '../../components/responses/UnprocessableEntity.yaml'}

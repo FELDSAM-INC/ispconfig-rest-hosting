@@ -12,6 +12,7 @@ properties:
         rule_id: {type: integer}
         outcome: {type: string, enum: [blocked, detected]}
         client_ip: {type: string}
+        client_banned: {type: boolean, description: Whether the website's server currently bans this client (spec 048).}
         method: {type: string}
         path: {type: string, description: URL path only. No query string or body.}
         parameter: {type: string, description: Argument name only, never its value.}
