@@ -4,7 +4,7 @@
 error_reporting(E_ALL);
 ini_set('display_errors', 'stderr');
 $request = json_decode(fgets(STDIN), true);
-if (!is_array($request) || !in_array($request['action'], array('dump', 'import', 'probe'), true)
+if (!is_array($request) || !in_array($request['action'], array('dump', 'import', 'probe', 'size'), true)
     || !preg_match('/^[a-zA-Z0-9_]{1,64}$/D', $request['database'])) {
     fwrite(STDERR, "Invalid database request\n"); exit(1);
 }
@@ -16,7 +16,8 @@ if (!function_exists('posix_geteuid') || posix_geteuid() !== 0 || (int)$conf['se
 $connection = array();
 $externalDefaults = null;
 if ($source) {
-    if ($request['action'] !== 'dump') { exit(1); }
+    // Source access is read-only: a dump or a size query, never import/probe.
+    if ($request['action'] !== 'dump' && $request['action'] !== 'size') { exit(1); }
     if (isset($request['source_connection'])) {
         $connection = $request['source_connection'];
         if (!is_array($connection) || !isset($connection['host']) || !is_string($connection['host'])
@@ -44,6 +45,7 @@ if ($source) {
         $request['host'] = isset($clientdb_host) ? $clientdb_host : 'localhost';
     }
 } else {
+    if ($request['action'] === 'size') { exit(1); }
     // ISPConfig provisions the scoped website user on the selected DB host.
     $request['host'] = 'localhost';
 }
@@ -74,14 +76,19 @@ if ($request['action'] === 'dump') {
     if (strpos($help, 'no-tablespaces') !== false) { $command .= ' --no-tablespaces'; }
     if (strpos($help, 'set-gtid-purged') !== false) { $command .= ' --set-gtid-purged=OFF'; }
     if (strpos($help, 'column-statistics') !== false) { $command .= ' --column-statistics=0'; }
-    if ($connection) {
-        // Explicit options override any host/socket from the credential file.
-        // This TCP connection originates on the old web server, never the runner.
-        $command .= ' --protocol=TCP --host='.escapeshellarg($connection['host']).' --port='.(int)$connection['port'];
-    }
+} elseif ($request['action'] === 'size') {
+    // Same measure as ISPConfig's database_size monitor; read-only. Only
+    // options known to old source clients (no --binary-mode before MySQL 5.6).
+    $command = 'mysql --defaults-file='.escapeshellarg($defaults).' --batch --skip-column-names --execute='
+        .escapeshellarg('SELECT COALESCE(SUM(data_length + index_length), 0) FROM information_schema.TABLES WHERE table_schema = DATABASE()');
 } else {
     $command = 'mysql --defaults-file='.escapeshellarg($defaults).' --binary-mode --local-infile=0 --batch';
     if ($request['action'] === 'probe') { $command .= ' --execute='.escapeshellarg('SELECT 1'); }
+}
+if ($connection) {
+    // Explicit options override any host/socket from the credential file.
+    // This TCP connection originates on the old web server, never the runner.
+    $command .= ' --protocol=TCP --host='.escapeshellarg($connection['host']).' --port='.(int)$connection['port'];
 }
 $command .= ' -- '.escapeshellarg($request['database']);
 // Pass the already-open stdin through. The JSON header is consumed one line at a time.

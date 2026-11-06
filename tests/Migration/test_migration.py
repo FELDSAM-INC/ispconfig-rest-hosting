@@ -34,12 +34,64 @@ class MigrationTests(unittest.TestCase):
             with self.subTest(summary=summary), self.assertRaises(m.MigrationError):
                 m.available_disk_mb(summary, 6)
 
-    def test_retry_and_sync_keep_already_created_website_quota(self):
+    def summary(self, disk=5120, traffic=None, database=1024, allocated_database=0, counts=None):
+        def metric(limit, allocated=0):
+            return {'limit_bytes': None if limit is None else limit * 1048576, 'allocated_bytes': allocated * 1048576}
+        return {'client_id': 6, 'web_disk': metric(disk), 'web_traffic_this_month': metric(traffic),
+                'database_size': metric(database, allocated_database), 'counts': counts or {}}
+
+    def migration(self, objects=None, databases=None):
         migration = object.__new__(m.Migration)
-        migration.state = {'objects': {'site': {'record': {'hd_quota': 5120}}}}
-        migration.admin = MagicMock()
-        self.assertEqual(5120, migration.website_disk_quota())
-        migration.admin.get.assert_not_called()
+        migration.client_id = 6
+        databases = databases or {'c57zana': 40 * 1048576}
+        migration.state = {'objects': objects or {}, 'source_size': {'web_bytes': 800 * 1048576, 'databases': databases},
+                           'inventory': {'children': [{'domain_id': '195', 'type': 'alias'}],
+                                         'databases': [{'database_name': name} for name in databases]}}
+        return migration
+
+    def test_retry_and_sync_keep_already_created_quotas(self):
+        migration = self.migration({'site': {'record': {'hd_quota': 5120, 'traffic_quota': -1}},
+                                    'db:c57zana': {'record': {'database_quota': 1024}}})
+        # The account is now fully allocated by this migration's own objects.
+        quotas = migration.allocation(self.summary(disk=5120, database=1024, allocated_database=1024))
+        self.assertEqual({'disk_mb': 5120, 'traffic_mb': -1, 'databases_mb': {'c57zana': 1024}}, quotas)
+
+    def test_database_quota_is_never_omitted_and_splits_by_source_size(self):
+        self.assertEqual({'c57zana': 1024}, m.database_quotas(self.summary(), 6, {'c57zana': 40 * 1048576}))
+        self.assertEqual({'app': 256, 'shop': 768},
+                         m.database_quotas(self.summary(), 6, {'app': 100 * 1048576, 'shop': 300 * 1048576}))
+        self.assertEqual({'a': 512}, m.database_quotas(self.summary(allocated_database=512), 6, {'a': 1}))
+        self.assertEqual({'a': -1}, m.database_quotas(self.summary(database=None), 6, {'a': 1}))
+        for remaining, sizes in [(0, {'a': 1}), (1024, {'a': 2000 * 1048576}), (1, {'a': 1, 'b': 1})]:
+            with self.subTest(sizes=sizes), self.assertRaises(m.MigrationError):
+                m.database_quotas(self.summary(database=remaining), 6, sizes)
+
+    def test_traffic_quota_follows_the_client_instead_of_configuration(self):
+        self.assertEqual(-1, m.available_traffic_mb(self.summary(), 6))
+        summary = self.summary(traffic=20480)
+        summary['web_traffic_this_month']['allocated_bytes'] = 4096 * 1048576
+        self.assertEqual(16384, m.available_traffic_mb(summary, 6))
+        with self.assertRaises(m.MigrationError):
+            m.available_traffic_mb(self.summary(traffic=0), 6)
+
+    def test_count_limits_and_source_sizes_are_checked_before_writes(self):
+        migration = self.migration()
+        self.assertEqual({'web_domains': 1, 'web_alias_domains': 1, 'web_subdomains': 0, 'database_users': 1, 'databases': 1},
+                         migration.needed_counts())
+        counts = {key: {'used': 0, 'limit': None} for key in m.COUNT_LIMITS}
+        counts['databases'] = {'used': 0, 'limit': 1}
+        m.check_counts(self.summary(counts=counts), migration.needed_counts())
+        counts['databases']['used'] = 1
+        with self.assertRaisesRegex(m.MigrationError, 'databases is too small: limit 1, used 1'):
+            m.check_counts(self.summary(counts=counts), migration.needed_counts())
+        with self.assertRaisesRegex(m.MigrationError, 'web_domains usage count'):
+            m.check_counts(self.summary(counts={}), migration.needed_counts())
+        with self.assertRaisesRegex(m.MigrationError, 'exceed the website disk quota'):
+            migration.allocation(self.summary(disk=512))
+        resumed = self.migration({'site': {'record': {'hd_quota': 5120}}, 'child:195': {'record': {}},
+                                  'user:c57zana': {'record': {}}})
+        self.assertEqual({'web_domains': 0, 'web_alias_domains': 0, 'web_subdomains': 0, 'database_users': 0, 'databases': 1},
+                         resumed.needed_counts())
 
     def test_problem_summary_exposes_limits_without_reflected_credentials(self):
         problem = {'type': 'https://github.com/FELDSAM-INC/ispconfig-rest/blob/main/docs/problems.md#quota-exceeded',

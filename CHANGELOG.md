@@ -5,6 +5,29 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.4] - 2026-11-06
+
+### Fixed
+
+- Migration databases are created with a database quota derived from the client allowance. v1.2.3 omitted
+  `database_quota`, which the API treats as unlimited and refuses for a client with a finite database quota
+  (`quota-exceeded: limit_database_quota ... requested=unlimited`). The unallocated quota is split across the
+  migrated databases in proportion to their source size; an unlimited plan keeps `-1`.
+- Website traffic quota also follows the client allowance; `target.traffic_quota_mb` is ignored like
+  `target.hd_quota_mb`, without changing existing configuration fingerprints.
+- The plan validates the client count limits (websites, alias domains, subdomains, databases, database users)
+  and measures the source read-only (website files with `du`, databases with `information_schema`) before the
+  first write. Migrations that cannot fit now stop before provisioning instead of between created objects,
+  during publication or with an over-quota database. The plan prints each quota with its source size, and
+  verifies the old database route before any write.
+- A resume refuses an uncertain previous create already during the plan.
+
+### Upgrade notes
+
+- Update hosting, then run `sudo ispconfig-rest server-tools update --components migration --server ID` and
+  repeat the original command. Existing configuration and state are kept; objects created by an earlier attempt
+  are reused, and a database refused by v1.2.3 is created on the retry.
+
 ## [1.2.3] - 2026-11-06
 
 ### Fixed
