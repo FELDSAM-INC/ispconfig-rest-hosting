@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-11-07
+
 ### Added
 
 - `ispcp-migrate --sites` lists every website of the old ISPConfig with where its public DNS points: `old`
@@ -16,7 +18,7 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Upgrade notes
 
-- `ispconfig-rest extension:update hosting --tag vX && ispconfig-rest server-tools update --components migration --server 4`
+- `ispconfig-rest extension:update hosting --tag v1.3.3 && ispconfig-rest server-tools update --components migration --server 4`
   installs the new helper. Configuration and migration state are unchanged.
 
 ## [1.3.2] - 2026-11-07
