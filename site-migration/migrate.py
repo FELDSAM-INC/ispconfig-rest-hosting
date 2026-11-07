@@ -5,10 +5,12 @@ No third-party Python modules. See README.md before using production credentials
 """
 import argparse
 import base64
+import concurrent.futures
 import contextlib
 import fcntl
 import gzip
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -16,7 +18,9 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -950,6 +954,384 @@ class Migration:
         self.publish()
 
 
+# --- ispcp-migrate --sites: which old websites are live --------------------------------------
+# Public DNS decides, not /etc/hosts or a server's own authoritative copy of a zone, so the
+# hostnames are asked directly from recursive resolvers (public ones unless --resolver is given).
+DNS_RESOLVERS = ('1.1.1.1', '8.8.8.8')
+DNS_A, DNS_AAAA, DNS_CNAME = 1, 28, 5
+DNS_RCODES = {1: 'FORMERR', 2: 'SERVFAIL', 3: 'NXDOMAIN', 4: 'NOTIMP', 5: 'REFUSED'}
+# Website status, strongest first: one hostname on the old server keeps the website "old".
+SITE_STATES = ('old', 'new', 'other', 'none')
+SITE_STATE_HELP = {'old': 'DNS points to the old server: live, migrate',
+                   'new': 'DNS points to the new web server: migrated',
+                   'other': 'DNS points elsewhere (or a proxy/CDN, compare traffic)',
+                   'none': 'no DNS address'}
+
+
+class DnsError(Exception):
+    pass
+
+
+def ascii_hostname(name):
+    name = str(name).strip().rstrip('.').lower()
+    try:
+        name = name.encode('idna').decode('ascii')
+    except UnicodeError:
+        raise DnsError('invalid name') from None
+    if not name or len(name) > 253 or any(not 0 < len(label) < 64 for label in name.split('.')):
+        raise DnsError('invalid name')
+    return name
+
+
+def dns_read_name(message, offset):
+    """Name at offset (with compression pointers) and the offset after it."""
+    labels, end, jumps = [], None, 0
+    while True:
+        if offset >= len(message):
+            raise DnsError('malformed response')
+        length = message[offset]
+        if length >= 0xC0:
+            jumps += 1
+            if offset + 1 >= len(message) or jumps > 32:
+                raise DnsError('malformed response')
+            end = offset + 2 if end is None else end
+            offset = (length & 0x3F) << 8 | message[offset + 1]
+        elif length >= 0x40 or offset + 1 + length > len(message):
+            raise DnsError('malformed response')
+        elif length == 0:
+            return '.'.join(labels).lower(), offset + 1 if end is None else end
+        else:
+            labels.append(message[offset + 1:offset + 1 + length].decode('ascii', 'replace'))
+            offset += 1 + length
+
+
+def dns_parse(message, ident, question):
+    """(truncated, rcode, [(owner, type, value)]) or None for a reply to another query."""
+    if len(message) < 12:
+        return None
+    rid, flags, questions, answers = struct.unpack('!HHHH', message[:8])
+    if rid != ident or not flags & 0x8000 or questions != 1 or message[12:12 + len(question)].lower() != question.lower():
+        return None
+    offset, records = 12 + len(question), []
+    for _ in range(answers):
+        owner, offset = dns_read_name(message, offset)
+        if offset + 10 > len(message):
+            raise DnsError('malformed response')
+        rtype, rclass, _, length = struct.unpack('!HHIH', message[offset:offset + 10])
+        offset += 10
+        if offset + length > len(message):
+            raise DnsError('malformed response')
+        data = message[offset:offset + length]
+        if rclass == 1 and rtype == DNS_A and length == 4:
+            records.append((owner, rtype, str(ipaddress.IPv4Address(data))))
+        elif rclass == 1 and rtype == DNS_AAAA and length == 16:
+            records.append((owner, rtype, ipaddress.IPv6Address(data).compressed))
+        elif rclass == 1 and rtype == DNS_CNAME:
+            records.append((owner, rtype, dns_read_name(message, offset)[0]))
+        offset += length
+    return bool(flags & 0x0200), flags & 0x000F, records
+
+
+def recv_exact(sock, size):
+    data = b''
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise DnsError('malformed response')
+        data += chunk
+    return data
+
+
+def dns_query(resolver, name, qtype, timeout=3.0):
+    """One recursive query over UDP (TCP when truncated): (rcode, records)."""
+    host, port = resolver
+    question = b''.join(bytes([len(label)]) + label.encode('ascii') for label in name.split('.')) + b'\0' + struct.pack('!HH', qtype, 1)
+    ident = secrets.randbits(16)
+    packet = struct.pack('!HHHHHH', ident, 0x0100, 1, 0, 0, 0) + question
+    deadline = time.monotonic() + timeout
+    try:
+        with socket.socket(socket.AF_INET6 if ':' in host else socket.AF_INET, socket.SOCK_DGRAM) as udp:
+            udp.connect((host, port))
+            udp.send(packet)
+            parsed = None
+            while parsed is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DnsError('timeout')
+                udp.settimeout(remaining)
+                parsed = dns_parse(udp.recv(65535), ident, question)
+        if parsed[0]:
+            with socket.create_connection((host, port), timeout=timeout) as tcp:
+                tcp.sendall(struct.pack('!H', len(packet)) + packet)
+                parsed = dns_parse(recv_exact(tcp, struct.unpack('!H', recv_exact(tcp, 2))[0]), ident, question)
+                if parsed is None:
+                    raise DnsError('malformed response')
+    except socket.timeout:
+        raise DnsError('timeout') from None
+    except OSError:
+        raise DnsError('resolver unreachable') from None
+    return parsed[1], parsed[2]
+
+
+def dns_ask(resolvers, name, qtype, timeout):
+    """Ask the resolvers in order; the next one only after a timeout or server failure."""
+    failure = 'timeout'
+    for resolver in resolvers:
+        try:
+            rcode, records = dns_query(resolver, name, qtype, timeout)
+        except DnsError as exc:
+            failure = str(exc)
+            continue
+        if rcode in (0, 3):
+            return rcode, records
+        failure = DNS_RCODES.get(rcode, 'RCODE %d' % rcode)
+    raise DnsError(failure)
+
+
+def resolve(name, resolvers, timeout=3.0):
+    """Public IPv4/IPv6 addresses of a hostname, following CNAMEs."""
+    addresses, chain, failures, nxdomain = [], [], [], False
+    try:
+        name = ascii_hostname(name)
+    except DnsError as exc:
+        return {'addresses': [], 'cname': [], 'error': str(exc)}
+    for qtype in (DNS_A, DNS_AAAA):
+        current, asked = name, set()
+        while current not in asked and len(asked) < 8:
+            asked.add(current)
+            try:
+                rcode, records = dns_ask(resolvers, current, qtype, timeout)
+            except DnsError as exc:
+                failures.append(str(exc))
+                break
+            if rcode == 3:
+                nxdomain = True
+                break
+            aliases = {owner: value for owner, rtype, value in records if rtype == DNS_CNAME}
+            target = current
+            for _ in range(8):
+                if target not in aliases:
+                    break
+                target = aliases[target]
+                if target not in chain:
+                    chain.append(target)
+            found = [value for owner, rtype, value in records if rtype == qtype and owner == target]
+            addresses += [value for value in found if value not in addresses]
+            if found or target == current:
+                break
+            current = target  # only the CNAME came back: ask for its target
+    error = None if addresses else 'NXDOMAIN' if nxdomain else failures[0] if failures else 'no address'
+    return {'addresses': addresses, 'cname': chain, 'error': error}
+
+
+def ip_text(value):
+    try:
+        return ipaddress.ip_address(str(value).strip()).compressed
+    except ValueError:
+        return None
+
+
+def resolver_address(value):
+    address = ip_text(value)
+    require(address, '--resolver takes an IP address: ' + str(value))
+    return address, 53
+
+
+def source_sites(config):
+    """Every website of the old ISPConfig, read on the old panel (no state, no writes)."""
+    host = ssh_host(config['source']['panel_ssh'])
+    result = subprocess.run(php_remote(host, 'source-sites.php'), stdin=subprocess.DEVNULL, capture_output=True)
+    if result.returncode:
+        # Only the helper's own messages and SSH errors; no credentials reach stderr.
+        lines = result.stderr.decode('utf-8', 'replace').strip().splitlines()
+        raise MigrationError('Reading the old websites on %s failed (exit %d)%s' % (
+            host, result.returncode, ': ' + lines[-1][:300] if lines else ''))
+    return json.loads(result.stdout)
+
+
+def site_hostnames(row):
+    domain = str(row['domain']).strip().lower().rstrip('.')
+    return [domain] + (['www.' + domain] if row.get('subdomain') in ('www', '*') else [])
+
+
+def site_list(inventory):
+    """Websites (vhosts, child vhosts) with the hostnames they serve: active aliases/subdomains included."""
+    children = {}
+    for row in inventory['websites']:
+        if row['type'] in ('alias', 'subdomain') and row.get('active') == 'y':
+            children.setdefault(str(row['parent_domain_id']), []).append(row)
+    servers = {str(server['server_id']): server['server_name'] for server in inventory['servers']}
+    domains = {str(row['domain_id']): row['domain'] for row in inventory['websites']}
+    traffic = inventory.get('traffic')
+    sites = []
+    for row in inventory['websites']:
+        if row['type'] in ('alias', 'subdomain'):
+            continue
+        names = site_hostnames(row)
+        for child in children.get(str(row['domain_id']), []):
+            names += [name for name in site_hostnames(child) if name not in names]
+        label = ' '.join(str(value) for value in (row.get('client_username'), row.get('client_company') or row.get('client_contact')) if value)
+        sites.append({
+            'domain': row['domain'], 'type': row['type'], 'id': int(row['domain_id']),
+            'parent': domains.get(str(row['parent_domain_id'])) if row['type'] != 'vhost' else None,
+            'server': servers.get(str(row['server_id']), str(row['server_id'])), 'server_id': int(row['server_id']),
+            'active': row.get('active') == 'y', 'document_root': row['document_root'],
+            'redirect': row.get('redirect_path') or None, 'client': label,
+            'databases': int(inventory.get('databases', {}).get(str(row['domain_id']), 0)),
+            'traffic_30d_bytes': None if traffic is None else int(sum(traffic.get(name, 0) for name in names)),
+            'hostnames': names,
+        })
+    return sites
+
+
+def server_addresses(inventory, config, extra_old, extra_new, lookup):
+    """Address → label for the old web servers and the new web server."""
+    old, new, warnings = {}, {}, []
+
+    def add(table, value, label):
+        address = ip_text(value)
+        if address and address not in table:
+            table[address] = label
+
+    names = {str(server['server_id']): server['server_name'] for server in inventory['servers']}
+    web_servers = sorted({str(row['server_id']) for row in inventory['websites']})
+    for row in inventory['ips']:
+        if str(row['server_id']) in web_servers:
+            add(old, row['ip_address'], names.get(str(row['server_id']), 'server ' + str(row['server_id'])))
+    for row in inventory['websites']:
+        for field in ('ip_address', 'ipv6_address'):
+            add(old, row.get(field), names.get(str(row['server_id']), 'server ' + str(row['server_id'])))
+    for server_id in web_servers:
+        if names.get(server_id):
+            for address in lookup(names[server_id])['addresses']:
+                add(old, address, 'DNS ' + names[server_id])
+    for address in extra_old:
+        add(old, address, '--old-ip')
+    target = config['target']
+    try:
+        api = Api(target['api_url'], target['api_key_file'])
+        for row in api.all('/servers/%d/ip-addresses' % int(target['web_server_id'])):
+            add(new, row.get('ip_address'), 'API server %s' % target['web_server_id'])
+    except (MigrationError, OSError, KeyError, TypeError, ValueError) as exc:
+        warnings.append('New web server addresses from the API are unavailable (%s); add them with --new-ip.' % exc)
+    host = str(target.get('web_ssh', '')).split('@')[-1]
+    if ip_text(host):
+        add(new, host, 'target.web_ssh')
+    elif '.' in host:
+        for address in lookup(host)['addresses']:
+            add(new, address, 'DNS ' + host)
+    for address in extra_new:
+        add(new, address, '--new-ip')
+    for address in set(old) & set(new):
+        warnings.append('%s is listed for both the old and the new server; counted as old.' % address)
+    return old, new, warnings
+
+
+def classify_sites(sites, resolved, old, new):
+    for site in sites:
+        site['dns'] = []
+        for name in site['hostnames']:
+            result = resolved[name]
+            addresses = result['addresses']
+            state = 'old' if any(a in old for a in addresses) else 'new' if any(a in new for a in addresses) \
+                else 'other' if addresses else 'none'
+            site['dns'].append(dict(result, name=name, state=state))
+        site['status'] = next(state for state in SITE_STATES if state == 'none' or any(entry['state'] == state for entry in site['dns']))
+    return sites
+
+
+def site_inventory(config, *, resolvers, extra_old=(), extra_new=(), workers=16, inventory=None):
+    inventory = source_sites(config) if inventory is None else inventory
+    sites = site_list(inventory)
+    cache = {}
+
+    def lookup(name):
+        if name not in cache:
+            cache[name] = resolve(name, resolvers)
+        return cache[name]
+
+    old, new, warnings = server_addresses(inventory, config, extra_old, extra_new, lookup)
+    names = sorted({name for site in sites for name in site['hostnames']} - set(cache))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        cache.update(zip(names, pool.map(lambda name: resolve(name, resolvers), names)))
+    return {'resolvers': [host for host, _ in resolvers], 'old_addresses': old, 'new_addresses': new,
+            'warnings': warnings, 'traffic': inventory.get('traffic') is not None,
+            'websites': classify_sites(sites, cache, old, new)}
+
+
+def human_bytes(value):
+    if value is None:
+        return '-'
+    if value >= 1024 ** 3:
+        return '%.1f GB' % (value / 1024 ** 3)
+    return '%d MB' % -(-value // MB)
+
+
+def print_sites(report, states=SITE_STATES, *, as_json=False, out=None):
+    out = out or sys.stdout
+    shown = sorted((site for site in report['websites'] if site['status'] in states),
+                   key=lambda site: (SITE_STATES.index(site['status']), site['domain']))
+    if as_json:
+        json.dump(dict(report, websites=shown), out, indent=2, ensure_ascii=False)
+        out.write('\n')
+        return
+
+    def addresses(table):
+        return ', '.join('%s (%s)' % item for item in table.items()) or '(none found)'
+
+    out.write('Old web server addresses: %s\n' % addresses(report['old_addresses']))
+    out.write('New web server addresses: %s\n' % addresses(report['new_addresses']))
+    out.write('DNS resolvers: %s\n' % ', '.join(report['resolvers']))
+    for warning in report['warnings']:
+        out.write('WARNING: %s\n' % warning)
+    rows = [('STATUS', 'WEBSITE', 'ACT', 'SERVER', 'CLIENT', 'DB', 'TRAFFIC 30D', 'DNS')]
+    for site in shown:
+        detail = []
+        for entry in site['dns']:
+            name = 'www' if entry['name'] == 'www.' + site['domain'] else entry['name']
+            value = entry['state'] if entry['state'] in ('old', 'new') else \
+                ','.join(entry['addresses'][:3]) + (',…' if len(entry['addresses']) > 3 else '') if entry['addresses'] else entry['error']
+            detail.append('%s=%s' % (name, value))
+        domain = site['domain'] + (' (in %s)' % site['parent'] if site['parent'] else '')
+        rows.append((site['status'], domain, 'y' if site['active'] else 'n', site['server'], site['client'][:28],
+                     str(site['databases']), human_bytes(site['traffic_30d_bytes']), ' '.join(detail)))
+    widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]) - 1)]
+    for row in rows:
+        out.write('  '.join(value.ljust(width) for value, width in zip(row, widths)) + '  ' + row[-1] + '\n')
+    counts = {state: sum(site['status'] == state for site in report['websites']) for state in SITE_STATES}
+    out.write('\n' + '\n'.join('%-5s %4d  %s' % (state, counts[state], SITE_STATE_HELP[state]) for state in SITE_STATES) + '\n')
+    inactive = sum(not site['active'] for site in report['websites'])
+    if inactive:
+        out.write('Inactive old websites (ACT n): %d; ISPConfig does not serve them.\n' % inactive)
+    if not report['traffic']:
+        out.write('Traffic statistics (web_traffic) are not available on the old panel.\n')
+
+
+def sites_options(parser):
+    parser.add_argument('--status', metavar='STATES', help='Only show these states, comma separated: old,new,other,none')
+    parser.add_argument('--json', action='store_true', help='Print JSON instead of the table')
+    parser.add_argument('--resolver', action='append', metavar='IP',
+                        help='Recursive DNS resolver to ask (repeatable; default %s)' % ' and '.join(DNS_RESOLVERS))
+    parser.add_argument('--old-ip', action='append', default=[], metavar='IP',
+                        help='Another public address of the old web server, e.g. behind NAT (repeatable)')
+    parser.add_argument('--new-ip', action='append', default=[], metavar='IP',
+                        help='Another public address of the new web server (repeatable)')
+
+
+def check_sites_options(args):
+    args.states = tuple(SITE_STATES if not args.status else [value.strip() for value in args.status.split(',')])
+    require(set(args.states) <= set(SITE_STATES), '--status takes old, new, other and/or none')
+    args.resolvers = [resolver_address(value) for value in (args.resolver or DNS_RESOLVERS)]
+    for value in args.old_ip + args.new_ip:
+        require(ip_text(value), 'Not an IP address: ' + value)
+
+
+def run_sites(args):
+    config = read_json(args.config)
+    report = site_inventory(config, resolvers=args.resolvers, extra_old=args.old_ip, extra_new=args.new_ip)
+    print_sites(report, args.states, as_json=args.json)
+
+
 def confirm(message):
     require(sys.stdin.isatty(), 'Interactive migration requires a terminal. Use --plan for a read-only check or the documented batch interface.')
     try:
@@ -983,8 +1365,23 @@ def interactive(migration, *, sync=False):
 
 def parse_args(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:2] == ['--simple', '--sites'] or argv[:1] == ['sites']:
+        simple = argv[0] == '--simple'
+        parser = argparse.ArgumentParser(
+            prog='ispcp-migrate --sites' if simple else 'migrate.py sites',
+            description='List the old ISPConfig websites and where their public DNS points.')
+        parser.add_argument('--config', default=DEFAULT_CONFIG, help='Connection settings (normally configured once)')
+        sites_options(parser)
+        args = parser.parse_args(argv[2:] if simple else argv[1:])
+        try:
+            check_sites_options(args)
+        except MigrationError as exc:
+            parser.error(str(exc))
+        args.command = 'sites'
+        return args
     if argv and argv[0] == '--simple':
-        parser = argparse.ArgumentParser(prog='ispcp-migrate', description='Migrate a website to an existing new ISPConfig client.')
+        parser = argparse.ArgumentParser(prog='ispcp-migrate', description='Migrate a website to an existing new ISPConfig client.',
+                                         epilog='Which old websites are live (DNS): ispcp-migrate --sites')
         parser.add_argument('domain', help='Domain on the old ISPConfig')
         parser.add_argument('client_id', type=int, help='Client ID in the NEW ISPConfig (not WHMCS)')
         actions = parser.add_mutually_exclusive_group()
@@ -1020,6 +1417,10 @@ def main(argv=None):
     args = parse_args(argv)
     os.umask(0o077)
     try:
+        if args.command == 'sites':
+            require(shutil.which('ssh'), 'Install required local command: ssh')
+            run_sites(args)
+            return 0
         for command in ('ssh', 'rsync', 'php'):
             require(shutil.which(command), 'Install required local command: ' + command)
         config = read_json(args.config)

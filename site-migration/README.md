@@ -164,6 +164,36 @@ Keep API keys, state, backups and configuration outside all document roots and G
 new database passwords, the temporary API key, customer files and SQL dumps. It uses directory mode 0700 and
 file mode 0600. Keep the state directory until the migration and any final sync are complete.
 
+## Which old websites are live
+
+Before choosing what to migrate, list every website of the old ISPConfig with where its public DNS points:
+
+```bash
+ispcp-migrate --sites
+ispcp-migrate --sites --status old          # only websites still served by the old server
+ispcp-migrate --sites --json > sites.json   # all details, e.g. for jq
+```
+
+It reads the websites on the old panel (`source.panel_ssh`, read-only: websites, aliases/subdomains, owners,
+database counts, server addresses and ISPConfig's traffic statistics) and asks recursive DNS resolvers for the
+A/AAAA records of each website, `www.` (for `www`/`*` websites) and every active alias and subdomain, following
+CNAMEs. It writes no state and needs no client ID. Each website gets the strongest state of its hostnames:
+
+| Status | Meaning |
+| --- | --- |
+| `old` | At least one hostname points to an old web server: the website is live there. Migrate it. |
+| `new` | Points to the new web server: already migrated. |
+| `other` | Points elsewhere: hosted somewhere else, or behind a proxy/CDN such as Cloudflare (compare `TRAFFIC 30D`). |
+| `none` | No hostname has an address (NXDOMAIN, no A/AAAA, or the resolver failed; the DNS column shows which). |
+
+Old server addresses are the old ISPConfig IP addresses of the servers hosting websites, website-specific IPs
+and the DNS addresses of those servers' names. New server addresses come from `GET /servers/ID/ip-addresses`
+(the configured REST key) and the DNS of `target.web_ssh`. The header prints both lists; add missing public
+addresses, e.g. behind NAT, with `--old-ip IP` / `--new-ip IP`. The resolvers are `1.1.1.1` and `8.8.8.8` by
+default, so `/etc/hosts` overrides and a server's own copy of a zone do not change the result; use
+`--resolver IP` for another recursive resolver. `TRAFFIC 30D` sums the old panel's `web_traffic` for the last
+30 days. Inactive websites (`ACT n`) are listed too, but ISPConfig does not serve them.
+
 ## One website: domain and client ID
 
 After changing the product and clicking **Create** in WHMCS, run this on the new web server as root:

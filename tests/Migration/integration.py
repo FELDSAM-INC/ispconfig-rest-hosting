@@ -12,12 +12,15 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('migration', ROOT / 'site-migration/migrate.py')
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fake_dns import FakeDns  # noqa: E402
 
 
 def sql(command):
@@ -140,6 +143,44 @@ class FakeApi:
         return row, None
 
 
+def check_sites(config, mode):
+    """--sites: source-sites.php over real SSH and MariaDB, then DNS through a local resolver.
+
+    Direct mode keeps the minimal fixture schema (no owner, server IP or traffic tables);
+    via-web adds them as in a full ISPConfig schema.
+    """
+    if mode == 'via-web':
+        sql("""ALTER TABLE dbispconfig.web_domain ADD sys_groupid INT DEFAULT 8, ADD ip_address VARCHAR(39) DEFAULT '*';
+            CREATE TABLE dbispconfig.sys_group(groupid INT, name VARCHAR(64), client_id INT);
+            INSERT INTO dbispconfig.sys_group VALUES (8, 'client7', 7);
+            CREATE TABLE dbispconfig.client(client_id INT, username VARCHAR(64), company_name VARCHAR(64), contact_name VARCHAR(64));
+            INSERT INTO dbispconfig.client VALUES (7, 'c7', 'Firma \u017e', 'Jan');
+            CREATE TABLE dbispconfig.server_ip(server_ip_id INT, server_id INT, ip_type VARCHAR(4), ip_address VARCHAR(39));
+            INSERT INTO dbispconfig.server_ip VALUES (1, 1, 'IPv4', '127.0.0.1');
+            CREATE TABLE dbispconfig.web_traffic(hostname VARCHAR(255), traffic_date DATE, traffic_bytes BIGINT UNSIGNED);
+            INSERT INTO dbispconfig.web_traffic VALUES ('example.test', CURDATE(), 2048),
+                ('example.test', DATE_SUB(CURDATE(), INTERVAL 40 DAY), 99999);""")
+    inventory = m.source_sites(config)
+    dns = FakeDns({'example.test': [('A', '127.0.0.1')], 'www.example.test': [('CNAME', 'example.test')],
+                   'alias.test': [('A', '203.0.113.9')]})
+    try:
+        report = m.site_inventory(config, resolvers=[dns.address], inventory=inventory,
+                                  extra_old=[] if mode == 'via-web' else ['127.0.0.1'])
+    finally:
+        dns.close()
+    site, = report['websites']
+    assert (site['domain'], site['status'], site['databases']) == ('example.test', 'old', 1), site
+    assert site['hostnames'] == ['example.test', 'www.example.test', 'alias.test', 'www.alias.test'], site
+    assert [entry['state'] for entry in site['dns']] == ['old', 'old', 'other', 'none'], site['dns']
+    if mode == 'via-web':
+        assert (site['client'], site['traffic_30d_bytes']) == ('c7 Firma \u017e', 2048), site
+        assert report['old_addresses'] == {'127.0.0.1': 'localhost'}, report
+    else:
+        assert (site['client'], site['traffic_30d_bytes'], report['traffic']) == ('', None, False), site
+    # The REST key is not configured in the fixture: listed as a warning, not a failure.
+    assert any('--new-ip' in warning for warning in report['warnings']), report['warnings']
+
+
 def main():
     assert Path('/.dockerenv').exists(), 'Never run fixture setup on a real host'
     os.umask(0o077)
@@ -211,6 +252,7 @@ def main():
     else:
         config['target']['web_transport'] = 'ssh'
         sql('UPDATE dbispconfig.web_domain SET server_php_id=17 WHERE domain_id=4;')
+    check_sites(config, mode)
     # Check the remote PHP helper's inventory before substituting REST.
     m.Api = FakeApi
     with tempfile.TemporaryDirectory(prefix='migration-test-') as state:

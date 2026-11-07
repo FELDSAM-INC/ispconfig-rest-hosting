@@ -13,7 +13,7 @@ trusted_path() {
         item=$(dirname -- "$item")
     done
 }
-files=(migrate.py target-files.py source-inventory.php server-check.php db-io.php wordpress-config.php normalize-sql.php ispcp-migrate config.example.json README.md)
+files=(migrate.py target-files.py source-inventory.php source-sites.php server-check.php db-io.php wordpress-config.php normalize-sql.php ispcp-migrate config.example.json README.md)
 trusted_path "$migration_source"
 trusted_path "$migration_source/../worker"
 for item in "${files[@]}" install.sh; do

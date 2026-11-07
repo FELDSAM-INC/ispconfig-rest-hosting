@@ -5,6 +5,20 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `ispcp-migrate --sites` lists every website of the old ISPConfig with where its public DNS points: `old`
+  (live on the old server, migrate it), `new` (already migrated), `other` (elsewhere or behind a CDN) or `none`
+  (no address), per hostname (`www.`, active aliases and subdomains, CNAMEs followed), with owner, database count
+  and 30-day traffic. Read-only on the old panel (`source-sites.php`, PHP 5.3+); DNS is asked from public
+  recursive resolvers (`--resolver`), so `/etc/hosts` and local zone copies do not skew it. `--status`, `--json`,
+  `--old-ip`/`--new-ip` for addresses behind NAT.
+
+### Upgrade notes
+
+- `ispconfig-rest extension:update hosting --tag vX && ispconfig-rest server-tools update --components migration --server 4`
+  installs the new helper. Configuration and migration state are unchanged.
+
 ## [1.3.2] - 2026-11-07
 
 ### Fixed

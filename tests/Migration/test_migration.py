@@ -2,11 +2,14 @@
 """Focused offline tests; integration coverage lives in integration.py."""
 import base64
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -16,6 +19,8 @@ TOOLS = ROOT / 'site-migration'
 spec = importlib.util.spec_from_file_location('migration', TOOLS / 'migrate.py')
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fake_dns import FakeDns  # noqa: E402
 
 
 class MigrationTests(unittest.TestCase):
@@ -375,6 +380,174 @@ $text = "DEFINER=root old_db";
             m.interactive(migration)
         migration.publish.assert_called_once_with(config_reviewed=True)
         migration.run.assert_not_called()
+
+
+OLD_WEB, NEW_WEB = '198.51.100.20', '198.51.100.119'
+
+
+def website(domain_id, domain, kind='vhost', parent=0, subdomain='none', active='y', **extra):
+    row = {'domain_id': str(domain_id), 'server_id': '1', 'parent_domain_id': str(parent), 'domain': domain,
+           'type': kind, 'subdomain': subdomain, 'active': active, 'ip_address': '*', 'ipv6_address': '',
+           'document_root': '' if kind in ('alias', 'subdomain') else '/var/www/clients/client5/web%d' % domain_id,
+           'redirect_type': '', 'redirect_path': ''}
+    row.update(extra)
+    return row
+
+
+# Shape of source-sites.php output (string columns, objects for databases/traffic).
+SITES_INVENTORY = {
+    'websites': [
+        website(10, 'live.sk', subdomain='www', client_id='5', client_username='c5', client_company='Firma s.r.o.', client_contact='Jan'),
+        website(11, 'live-alias.sk', 'alias', parent=10),
+        website(12, 'off-alias.sk', 'alias', parent=10, active='n'),
+        website(20, 'moved.sk'),
+        website(30, 'cdn.sk', subdomain='www'),
+        website(40, 'dead.sk', active='n'),
+        website(41, 'shop.dead.sk', 'vhostsubdomain', parent=40),
+        website(50, 'own-ip.sk', ip_address='198.51.100.21'),
+        website(60, 'db-ip.sk'),
+    ],
+    'databases': {'10': 2},
+    'servers': [{'server_id': '1', 'server_name': 'web0.old.test'}, {'server_id': '2', 'server_name': 'db0.old.test'}],
+    'ips': [{'server_id': '1', 'ip_address': OLD_WEB}, {'server_id': '2', 'ip_address': '198.51.100.30'}],
+    'traffic': {'live.sk': 3 * 1024 ** 3, 'cdn.sk': 5 * 1048576},
+}
+SITES_DNS = {
+    'live.sk': [('A', OLD_WEB)], 'www.live.sk': [('CNAME', 'live.sk')], 'live-alias.sk': [('A', '104.21.9.9')],
+    'off-alias.sk': [('A', OLD_WEB)], 'moved.sk': [('A', NEW_WEB)], 'cdn.sk': [('A', '104.21.1.1')],
+    'www.cdn.sk': [('CNAME', 'cdn.sk')], 'own-ip.sk': [('A', '198.51.100.21')], 'db-ip.sk': [('A', '198.51.100.30')],
+    'web0.old.test': [('A', '198.51.100.25'), ('AAAA', '2001:db8:100::20')], 'web0.new.test': [('AAAA', '2001:db8:100::119')],
+}
+SITES_CONFIG = {'source': {'panel_ssh': 'root@web0.old.test'},
+                'target': {'api_url': 'https://panel.test:8090/api/v1', 'api_key_file': '/root/key',
+                           'web_ssh': 'root@web0.new.test', 'web_server_id': 4}}
+
+
+class ServerAddressApi:
+    def __init__(self, url, key_file):
+        pass
+
+    def all(self, path):
+        assert path == '/servers/4/ip-addresses', path
+        return [{'ip_address': NEW_WEB, 'ip_type': 'IPv4'}]
+
+
+class SiteInventoryTests(unittest.TestCase):
+    def resolver(self, records=None, **options):
+        server = FakeDns(SITES_DNS if records is None else records, **options)
+        self.addCleanup(server.close)
+        return server
+
+    def test_resolve_follows_cnames_and_reads_ipv4_and_ipv6(self):
+        dns = self.resolver({'example.sk': [('A', OLD_WEB), ('AAAA', '2001:db8:100:0::20')], 'www.example.sk': [('CNAME', 'example.sk')]})
+        self.assertEqual({'addresses': [OLD_WEB, '2001:db8:100::20'], 'cname': ['example.sk'], 'error': None},
+                         m.resolve('WWW.Example.sk.', [dns.address]))
+
+    def test_a_cname_answered_alone_is_asked_for_its_target(self):
+        dns = self.resolver({'shop.example.sk': [('CNAME', 'edge.cdn.test')], 'edge.cdn.test': [('A', '104.21.1.1')]},
+                            cname_only={'shop.example.sk'})
+        result = m.resolve('shop.example.sk', [dns.address])
+        self.assertEqual((['104.21.1.1'], ['edge.cdn.test'], None), (result['addresses'], result['cname'], result['error']))
+        self.assertIn(('edge.cdn.test', m.DNS_A, 'udp'), dns.queries)
+
+    def test_nxdomain_is_final_but_a_server_failure_asks_the_next_resolver(self):
+        failing, working = self.resolver(rcode=2), self.resolver({'example.sk': [('A', OLD_WEB)]})
+        self.assertEqual([OLD_WEB], m.resolve('example.sk', [failing.address, working.address])['addresses'])
+        self.assertEqual('SERVFAIL', m.resolve('example.sk', [failing.address])['error'])
+        first, second = self.resolver({}), self.resolver({'gone.sk': [('A', OLD_WEB)]})
+        self.assertEqual('NXDOMAIN', m.resolve('gone.sk', [first.address, second.address])['error'])
+        self.assertEqual([], second.queries)
+
+    def test_silent_resolver_times_out_and_the_next_one_answers(self):
+        silent = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        silent.bind(('127.0.0.1', 0))
+        self.addCleanup(silent.close)
+        dns = self.resolver({'example.sk': [('A', OLD_WEB)]})
+        self.assertEqual([OLD_WEB], m.resolve('example.sk', [silent.getsockname(), dns.address], timeout=0.2)['addresses'])
+        self.assertEqual('timeout', m.resolve('example.sk', [silent.getsockname()], timeout=0.2)['error'])
+
+    def test_truncated_answer_is_repeated_over_tcp(self):
+        dns = self.resolver({'big.example.sk': [('A', OLD_WEB)]}, truncate={'big.example.sk'})
+        self.assertEqual([OLD_WEB], m.resolve('big.example.sk', [dns.address])['addresses'])
+        self.assertIn(('big.example.sk', m.DNS_A, 'tcp'), dns.queries)
+
+    def test_malformed_answers_and_names_are_rejected(self):
+        with self.assertRaises(m.DnsError):
+            m.dns_read_name(b'\xc0\x00', 0)  # compression pointer loop
+        with self.assertRaises(m.DnsError):
+            m.dns_read_name(b'\x05abc', 0)
+        self.assertEqual('invalid name', m.resolve('a..b', [('127.0.0.1', 9)])['error'])
+        self.assertEqual('xn--bcher-kva.de', m.ascii_hostname('Bücher.de'))
+
+    def report(self, **options):
+        dns = self.resolver()
+        with patch.object(m, 'Api', ServerAddressApi):
+            return m.site_inventory(SITES_CONFIG, resolvers=[dns.address], inventory=SITES_INVENTORY, **options)
+
+    def test_websites_are_classified_by_where_their_public_dns_points(self):
+        report = self.report()
+        sites = {site['domain']: site for site in report['websites']}
+        self.assertEqual({'live.sk': 'old', 'moved.sk': 'new', 'cdn.sk': 'other', 'dead.sk': 'none',
+                          'shop.dead.sk': 'none', 'own-ip.sk': 'old', 'db-ip.sk': 'other'},
+                         {domain: site['status'] for domain, site in sites.items()})
+        live = sites['live.sk']
+        # An inactive alias is not served, so its DNS does not count.
+        self.assertEqual(['live.sk', 'www.live.sk', 'live-alias.sk'], live['hostnames'])
+        self.assertEqual(['old', 'old', 'other'], [entry['state'] for entry in live['dns']])
+        self.assertEqual((2, 3 * 1024 ** 3, 'c5 Firma s.r.o.'), (live['databases'], live['traffic_30d_bytes'], live['client']))
+        self.assertEqual(('dead.sk', False), (sites['shop.dead.sk']['parent'], sites['dead.sk']['active']))
+        self.assertEqual('NXDOMAIN', sites['dead.sk']['dns'][0]['error'])
+        # Old: server_ip of web servers, website IPs and the server name in DNS; never another server's IPs.
+        self.assertEqual({OLD_WEB, '198.51.100.21', '198.51.100.25', '2001:db8:100::20'}, set(report['old_addresses']))
+        self.assertEqual({NEW_WEB: 'API server 4', '2001:db8:100::119': 'DNS web0.new.test'}, report['new_addresses'])
+        self.assertEqual([], report['warnings'])
+
+    def test_missing_api_addresses_warn_and_manual_addresses_apply(self):
+        dns = self.resolver()
+        with patch.object(m, 'Api', side_effect=m.MigrationError('API key file must be a regular private file (0600)')):
+            report = m.site_inventory(SITES_CONFIG, resolvers=[dns.address], inventory=SITES_INVENTORY,
+                                      extra_new=[NEW_WEB], extra_old=['104.21.1.1'])
+        sites = {site['domain']: site['status'] for site in report['websites']}
+        self.assertEqual(('new', 'old'), (sites['moved.sk'], sites['cdn.sk']))
+        self.assertIn('--new-ip', report['warnings'][0])
+
+    def test_table_and_json_output(self):
+        report = self.report()
+        out = io.StringIO()
+        m.print_sites(report, out=out)
+        text = out.getvalue()
+        lines = text.splitlines()
+        self.assertTrue(lines[0].startswith('Old web server addresses: 198.51.100.20 (web0.old.test)'), lines[0])
+        rows = [line.split()[:2] for line in lines if line.split()[:1] in (['old'], ['new'], ['other'], ['none'])][:7]
+        self.assertEqual([['old', 'live.sk'], ['old', 'own-ip.sk'], ['new', 'moved.sk'], ['other', 'cdn.sk'],
+                          ['other', 'db-ip.sk'], ['none', 'dead.sk'], ['none', 'shop.dead.sk']], rows)
+        live = next(line for line in lines if line.startswith('old') and 'live.sk' in line)
+        self.assertIn('c5 Firma s.r.o.', live)
+        self.assertIn('3.0 GB', live)
+        self.assertTrue(live.endswith('live.sk=old www=old live-alias.sk=104.21.9.9'), live)
+        self.assertIn('shop.dead.sk (in dead.sk)', text)
+        self.assertIn('dead.sk=NXDOMAIN', text)
+        self.assertRegex(text, r'\nold +2  DNS points to the old server')
+        self.assertIn('Inactive old websites (ACT n): 1', text)
+        out = io.StringIO()
+        m.print_sites(report, ('old',), as_json=True, out=out)
+        shown = json.loads(out.getvalue())
+        self.assertEqual(['live.sk', 'own-ip.sk'], [site['domain'] for site in shown['websites']])
+        self.assertEqual(['104.21.9.9'], shown['websites'][0]['dns'][2]['addresses'])
+
+    def test_sites_command_line(self):
+        args = m.parse_args(['--simple', '--sites', '--status', 'old, none', '--resolver', '9.9.9.9', '--new-ip', '2001:db8:100::119'])
+        self.assertEqual(('sites', ('old', 'none'), [('9.9.9.9', 53)]), (args.command, args.states, args.resolvers))
+        self.assertEqual([('1.1.1.1', 53), ('8.8.8.8', 53)], m.parse_args(['sites', '--config', '/c.json']).resolvers)
+        for bad in (['--status', 'live'], ['--resolver', 'dns.google'], ['--old-ip', 'web0']):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit), patch('sys.stderr', io.StringIO()):
+                m.parse_args(['--simple', '--sites'] + bad)
+
+    def test_old_panel_failure_reports_the_ssh_or_helper_message(self):
+        failure = subprocess.CompletedProcess([], 255, b'', b'warning: pq kex\nHost key verification failed.\r\n')
+        with patch.object(m.subprocess, 'run', return_value=failure):
+            with self.assertRaisesRegex(m.MigrationError, 'root@web0.old.test failed \\(exit 255\\): Host key verification failed.$'):
+                m.source_sites(SITES_CONFIG)
 
 
 if __name__ == '__main__':
