@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-08
+
 ### Added
 
 - WAF rule exceptions accept a path prefix: a path ending in `*` (`/admin/pages/edit/*`) covers every page below it,
@@ -14,8 +16,9 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Upgrade notes
 
-- Update the WAF worker on every web server: `ispconfig-rest server-tools update --components waf --yes`. An older
-  worker cannot read a website with a prefix exception: it stops collecting that website's events and honouring its IP
+- `ispconfig-rest extension:update hosting --tag v1.5.0 && ispconfig-rest server-tools update --components waf --yes`
+  updates the API and the WAF worker on every web server. Update the workers before customers save a prefix. An older
+  worker cannot read a website with a prefix exception, so it stops collecting that website's events and honouring its IP
   allowlist for bans until it is updated.
 
 ## [1.4.0] - 2026-11-08
