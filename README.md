@@ -63,6 +63,22 @@ ISPConfig through root SSH, can export the old database through the old web serv
 resources through client-scoped REST permissions. Product changes and **Create** in WHMCS remain manual.
 This component requires hosting v1.2.0+ and ispconfig-rest v1.4.2+.
 
+## Let's Encrypt when the domain points to the server
+
+ISPConfig requests a Let's Encrypt certificate only once, while it applies the change that enables it, and switches
+Let's Encrypt off again when the domain does not reach the server yet (for example right after a migration, until
+DNS caches expire). `PUT /api/v1/sites/web-domains/{id}/ssl/letsencrypt-wait` keeps the request instead: the API asks
+public resolvers (1.1.1.1, 8.8.8.8 and 9.9.9.9) every 5 minutes during the first day, then every 30 minutes, for up to
+7 days, and enables Let's Encrypt as soon as the website's preferred name (www when it redirects to www) points to
+the server. Names that point elsewhere are added to the certificate later. The redirect to HTTPS can follow the
+certificate. See [spec 059](specs/059-letsencrypt-dns-wait/spec.md).
+
+It needs the API scheduler (`ispconfig-rest schedule:install`, set up by the installer) and outgoing DNS (UDP 53) from
+the panel to the resolvers. The names must resolve to the public addresses in ISPConfig's server IP list, IPv6
+included when the domains have AAAA records. Behind NAT, set the public addresses in the API's `.env`:
+`LETSENCRYPT_WAIT_SERVER_ADDRESSES={"4": ["203.0.113.10", "2001:db8::10"]}` (server id 4). Other resolvers:
+`LETSENCRYPT_WAIT_RESOLVERS=1.1.1.1,8.8.8.8,9.9.9.9`.
+
 ## Development
 
 The extension runs inside an ispconfig-rest checkout:

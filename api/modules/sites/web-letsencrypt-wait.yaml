@@ -1,0 +1,54 @@
+/sites/web-domains/{id}/ssl/letsencrypt-wait:
+  parameters:
+    - {name: id, in: path, required: true, schema: {type: integer, minimum: 1}}
+  get:
+    tags: [Web Domains]
+    summary: Let's Encrypt waiting for the website's domain to point to its server
+    description: |
+      Website read scope; private/no-store. `state` is `none` without a wait. The names are the certificate's names
+      as ISPConfig requests them, with the addresses the public resolvers returned at the last check.
+    responses:
+      '200': {description: Wait state, content: {application/json: {schema: {$ref: '../../components/schemas/WebLetsEncryptWait.yaml'}}}}
+      '401': {$ref: '../../components/responses/Unauthorized.yaml'}
+      '404': {$ref: '../../components/responses/NotFound.yaml'}
+  put:
+    tags: [Web Domains]
+    summary: Request Let's Encrypt once the domain points to the website's server
+    description: |
+      Starts (or restarts) the wait and checks right away. ISPConfig 3.3 requests a certificate only while it
+      processes the change that enables Let's Encrypt and switches it off again when no name reaches the server, so
+      the API keeps the request: public resolvers (default 1.1.1.1, 8.8.8.8 and 9.9.9.9; all that answer must agree, at
+      least two) are asked every 5 minutes during the first day, then every 30 minutes, for up to 7 days. Once the
+      preferred name points to the server's public addresses (www when the website redirects to www, otherwise the
+      domain; only expected IPv6 addresses), SSL and Let's Encrypt are enabled through the normal website update and
+      journaled as the account that started the wait. Names that still point elsewhere are left out by ISPConfig and
+      added with a renewal when they point too. With `redirect_https`, the redirect to HTTPS is switched on once the
+      certificate is issued. A failed issuance is retried after 15 minutes, five times at most.
+
+      Requires website update permission, an unlocked account and SSL and Let's Encrypt in the plan. A manual SSL
+      change, a rename, a transfer or deletion of the website ends the wait.
+    requestBody:
+      required: false
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              redirect_https: {type: boolean, default: false, description: Switch on the redirect to HTTPS after issuance.}
+    responses:
+      '200': {description: Wait state after the first check, headers: {X-Change-Set-Id: {$ref: '../../components/headers/ChangeSetId.yaml'}}, content: {application/json: {schema: {$ref: '../../components/schemas/WebLetsEncryptWait.yaml'}}}}
+      '401': {$ref: '../../components/responses/Unauthorized.yaml'}
+      '403': {$ref: '../../components/responses/Forbidden.yaml'}
+      '404': {$ref: '../../components/responses/NotFound.yaml'}
+      '409': {$ref: '../../components/responses/Conflict.yaml'}
+      '422': {$ref: '../../components/responses/UnprocessableEntity.yaml'}
+  delete:
+    tags: [Web Domains]
+    summary: Stop waiting
+    description: Ends the wait; SSL settings already applied stay. Requires website update permission and an unlocked account.
+    responses:
+      '204': {description: No wait remains}
+      '401': {$ref: '../../components/responses/Unauthorized.yaml'}
+      '403': {$ref: '../../components/responses/Forbidden.yaml'}
+      '404': {$ref: '../../components/responses/NotFound.yaml'}

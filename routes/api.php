@@ -2,6 +2,7 @@
 
 use Illuminate\Support\Facades\Route;
 use IspconfigRestHosting\Http\Controllers\DatabaseOperationController;
+use IspconfigRestHosting\Http\Controllers\LetsEncryptWaitController;
 use IspconfigRestHosting\Http\Controllers\ResourceUsageController;
 use IspconfigRestHosting\Http\Controllers\WebLogController;
 use IspconfigRestHosting\Http\Controllers\WebWafController;
@@ -28,6 +29,11 @@ Route::middleware(['api', 'api.key', 'change.set'])->prefix('api/v1')->group(fun
     Route::get('sites/web-domains/{webDomain}/waf/clients', [WebWafController::class, 'clients'])->whereNumber('webDomain');
     Route::get('sites/web-domains/{webDomain}/waf', [WebWafController::class, 'show'])->whereNumber('webDomain');
     Route::put('sites/web-domains/{webDomain}/waf', [WebWafController::class, 'update'])->whereNumber('webDomain');
+
+    // Let's Encrypt once the domain points to the website's server (spec 059).
+    Route::get('sites/web-domains/{webDomain}/ssl/letsencrypt-wait', [LetsEncryptWaitController::class, 'show'])->whereNumber('webDomain');
+    Route::put('sites/web-domains/{webDomain}/ssl/letsencrypt-wait', [LetsEncryptWaitController::class, 'update'])->whereNumber('webDomain');
+    Route::delete('sites/web-domains/{webDomain}/ssl/letsencrypt-wait', [LetsEncryptWaitController::class, 'destroy'])->whereNumber('webDomain');
 
     // Database operations — scoped through the database route binding.
     Route::post('sites/databases/{webDatabase}/operations', [DatabaseOperationController::class, 'store'])->whereNumber('webDatabase');

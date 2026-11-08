@@ -5,6 +5,25 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Let's Encrypt once the domain points to the server (spec 059): `PUT /sites/web-domains/{id}/ssl/letsencrypt-wait`
+  waits until the website's preferred name (www when the website redirects to www, otherwise the domain) resolves to
+  its server's public addresses at the public resolvers 1.1.1.1, 8.8.8.8 and 9.9.9.9, then enables Let's Encrypt
+  through the normal website update. ISPConfig itself tries only once and switches Let's Encrypt off when the domain
+  does not reach the server yet. Checks run every 5 minutes during the first day, then every 30 minutes, for up to
+  7 days; names that still point elsewhere are added with a renewal when they point too, `redirect_https` switches the
+  redirect to HTTPS on after issuance, and a failed issuance is retried five times. `GET` shows every name with the
+  addresses found and whether the certificate covers it, `DELETE` stops waiting, and websites carry
+  `letsencrypt_wait`. A manual SSL change, a rename, a transfer or deletion ends the wait.
+
+### Upgrade notes
+
+- `ispconfig-rest extension:update hosting --tag vX.Y.Z` adds the table and the `letsencrypt:wait` task of the API
+  scheduler (run `ispconfig-rest schedule:install` if `/etc/cron.d/ispconfig-rest` is missing). The
+  panel needs outgoing DNS (UDP 53) to the resolvers, and ISPConfig's server IP list must hold the web servers'
+  public addresses, IPv6 included where domains have AAAA records; behind NAT set `LETSENCRYPT_WAIT_SERVER_ADDRESSES`.
+
 ## [1.5.0] - 2026-11-08
 
 ### Added

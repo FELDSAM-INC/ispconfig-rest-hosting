@@ -9,15 +9,18 @@ use App\Models\WebDatabase;
 use App\Models\WebDatabaseUser;
 use App\Models\WebDomain;
 use App\Support\IspContext;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Http\Middleware\TrimStrings;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\ServiceProvider;
+use IspconfigRestHosting\Console\LetsEncryptWait;
 use IspconfigRestHosting\Console\ServerToolsInventory;
 use IspconfigRestHosting\Services\ClientResourceLimitsService;
 use IspconfigRestHosting\Services\ClientWebPhpPolicyService;
 use IspconfigRestHosting\Services\DatabaseOperationService;
+use IspconfigRestHosting\Services\LetsEncryptWaitService;
 use IspconfigRestHosting\Services\WebLogService;
 use IspconfigRestHosting\Services\WebPhpSettingsService;
 use IspconfigRestHosting\Services\WebRuntimeService;
@@ -47,8 +50,9 @@ class HostingServiceProvider extends ServiceProvider
     {
         $this->beforePolicy = new WeakMap;
         $this->mergeConfigFrom(__DIR__.'/../config/web_logs.php', 'web_logs');
+        $this->mergeConfigFrom(__DIR__.'/../config/letsencrypt_wait.php', 'letsencrypt_wait');
 
-        foreach ([DatabaseOperationService::class, WebLogService::class, WebWafService::class, WordPressService::class] as $service) {
+        foreach ([DatabaseOperationService::class, LetsEncryptWaitService::class, WebLogService::class, WebWafService::class, WordPressService::class] as $service) {
             $this->app->scoped($service);
             $this->app->rebinding('request', fn ($app) => $app->forgetInstance($service));
         }
@@ -62,8 +66,12 @@ class HostingServiceProvider extends ServiceProvider
         // Same file names as when they shipped with ispconfig-rest, so existing installations do not run them again.
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
         if ($this->app->runningInConsole()) {
-            $this->commands([ServerToolsInventory::class]);
+            $this->commands([LetsEncryptWait::class, ServerToolsInventory::class]);
         }
+        // Spec 059: the API scheduler (ispconfig-rest schedule:install) checks the due Let's Encrypt waits.
+        $this->callAfterResolving(Schedule::class, function (Schedule $schedule): void {
+            $schedule->command('letsencrypt:wait')->everyMinute()->withoutOverlapping(15);
+        });
 
         $this->websites($hooks);
         $this->scheduledTasks($hooks);
@@ -79,6 +87,7 @@ class HostingServiceProvider extends ServiceProvider
             'waf_mode' => app(WebWafService::class)->mode($site),
             'wordpress' => app(WordPressService::class)->summary($site),
             'runtime_capabilities' => app(WebRuntimeService::class)->capabilities($site),
+            'letsencrypt_wait' => app(LetsEncryptWaitService::class)->state($site),
         ]);
         $hooks->attribute(WebDomain::class, 'public_document_root', fn (?string $root, WebDomain $site): ?string => app(WebRuntimeService::class)->publicRoot($site));
         $hooks->detail(WebDomain::class, fn (WebDomain $site): array => [
@@ -117,6 +126,7 @@ class HostingServiceProvider extends ServiceProvider
 
         $hooks->saving(WebDomain::class, function (WebDomain $site, array $fields, string $action): void {
             app(WebWafService::class)->refreshIdentity($site);
+            app(LetsEncryptWaitService::class)->siteChanging($site, $action);
             if ($action === 'create') {
                 $this->beforePolicy[$site] = clone $site;
             }
@@ -140,7 +150,10 @@ class HostingServiceProvider extends ServiceProvider
                 $policy->snapshot($before, $ownerClientId, $stored['force_fpm']);
             }
         });
-        $hooks->deleted(WebDomain::class, fn (int $id) => app(ClientWebPhpPolicyService::class)->forgetSite($id));
+        $hooks->deleted(WebDomain::class, function (int $id): void {
+            app(ClientWebPhpPolicyService::class)->forgetSite($id);
+            app(LetsEncryptWaitService::class)->cancel($id);
+        });
     }
 
     private function scheduledTasks(Hooks $hooks): void

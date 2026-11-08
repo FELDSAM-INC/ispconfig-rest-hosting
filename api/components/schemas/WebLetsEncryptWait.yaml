@@ -1,0 +1,42 @@
+type: object
+required: [state, reason, redirect_https, started_at, expires_at, last_checked_at, next_check_at, finished_at, failures, expected_addresses, names]
+properties:
+  state:
+    type: string
+    enum: [none, waiting, issuing, extending, completed, expired, failed]
+    description: |
+      `waiting` for DNS, `issuing` while ISPConfig processes the request, `extending` when the certificate is issued
+      and names left out are still watched, `completed`, `expired` (the preferred name never pointed to the server),
+      `failed` (issuance failed five times, or the plan or website settings do not allow it).
+  reason:
+    type: string
+    nullable: true
+    enum: [not_pointing, no_public_address, issuance_failed, stalled, not_in_plan, rejected, partial, certificate_unreadable, null]
+    description: |
+      Why the last attempt failed or how it ended: `issuance_failed` (ISPConfig switched Let's Encrypt off or issued
+      without the preferred name), `stalled` (ISPConfig did not process the change within 30 minutes), `rejected` (the
+      website update refused SSL, e.g. without SNI), `partial` (the wait ended with names still left out),
+      `certificate_unreadable` (issued, but the served certificate could not be read to compare its names).
+  redirect_https: {type: boolean}
+  started_at: {type: string, format: date-time, nullable: true}
+  expires_at: {type: string, format: date-time, nullable: true}
+  last_checked_at: {type: string, format: date-time, nullable: true}
+  next_check_at: {type: string, format: date-time, nullable: true}
+  finished_at: {type: string, format: date-time, nullable: true}
+  failures: {type: integer, minimum: 0}
+  expected_addresses:
+    type: array
+    description: The public addresses of the website (its own IP address) or of its server the names must resolve to.
+    items: {type: string}
+  names:
+    type: array
+    items:
+      type: object
+      required: [name, required, points, status, addresses, certified]
+      properties:
+        name: {type: string}
+        required: {type: boolean, description: The preferred name; the certificate is requested once it points to the server.}
+        points: {type: boolean}
+        status: {type: string, enum: [points, elsewhere, unresolved, unknown], description: '`unknown`: too few resolvers answered.'}
+        addresses: {type: array, items: {type: string}, description: Addresses the resolvers returned.}
+        certified: {type: boolean, description: The name is in the certificate the server presents.}

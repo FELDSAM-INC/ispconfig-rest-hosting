@@ -35,6 +35,13 @@ properties:
 
   waf_available: {type: boolean, readOnly: true, description: WAF server tool is installed and reporting a current heartbeat.}
 
+  letsencrypt_wait:
+    type: string
+    enum: [waiting, issuing, extending, completed, expired, failed]
+    nullable: true
+    readOnly: true
+    description: State of the website's Let's Encrypt wait (`GET /sites/web-domains/{id}/ssl/letsencrypt-wait`), null without one.
+
   waf_mode:
     type: string
     enum: ['off', detection, enforcing]

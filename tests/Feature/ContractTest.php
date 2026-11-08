@@ -16,6 +16,8 @@ class ContractTest extends TestCase
         'PUT /sites/databases/{id}/operations/{operation}/chunks/{sequence}',
         'POST /sites/databases/{id}/operations/{operation}/upload-complete',
         'DELETE /sites/databases/{id}/operations/{operation}',
+        // Spec 059: removes the API's own wait row only.
+        'DELETE /sites/web-domains/{id}/ssl/letsencrypt-wait',
     ];
 
     /** @return array<string, array<string, mixed>> path => operations, resolved from the extension's root fragment */
@@ -67,7 +69,7 @@ class ContractTest extends TestCase
     public function test_core_schemas_are_served_with_the_extension_fields(): void
     {
         $website = Yaml::parse($this->get('/api/components/schemas/WebDomain.yaml')->assertOk()->getContent());
-        foreach (['logs_available', 'waf_available', 'waf_mode', 'wordpress', 'runtime_capabilities', 'runtime_settings', 'php_settings', 'public_document_root', 'domain'] as $field) {
+        foreach (['logs_available', 'letsencrypt_wait', 'waf_available', 'waf_mode', 'wordpress', 'runtime_capabilities', 'runtime_settings', 'php_settings', 'public_document_root', 'domain'] as $field) {
             $this->assertArrayHasKey($field, $website['properties']);
         }
         $this->assertArrayHasKey('output_log', Yaml::parse($this->get('/api/components/schemas/CronJob.yaml')->getContent())['properties']);
