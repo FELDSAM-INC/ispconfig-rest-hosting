@@ -40,6 +40,7 @@ FILES = (
     "dns-catalog/install.sh", "dns-catalog/run.php", "dns-catalog/ispconfig-dns-catalog", "src/Support/DnsCatalog.php",
     "site-migration/install.sh", "site-migration/ispcp-migrate", "site-migration/migrate.py",
     "site-migration/target-files.py", "site-migration/source-inventory.php", "site-migration/source-sites.php",
+    "site-migration/plesk-source.py",
     "site-migration/server-check.php",
     "site-migration/db-io.php", "site-migration/wordpress-config.php", "site-migration/normalize-sql.php",
     "site-migration/config.example.json", "site-migration/README.md",

@@ -5,9 +5,9 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 image=ispcp-migration-test
 docker build -q -t "$image" - <<'DOCKERFILE'
 FROM ubuntu:24.04
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 php-cli php-mysql rsync openssh-server openssh-client mariadb-server mariadb-client ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 php-cli php-mysql rsync openssh-server openssh-client mariadb-server mariadb-client ca-certificates cron && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
-for source_mode in direct via-web; do
+for source_mode in ${ISPCP_TEST_MODES:-direct via-web plesk}; do
 docker run --rm -i -e "ISPCP_TEST_SOURCE_MODE=$source_mode" -v "$root:/repo:ro" "$image" bash -s <<'SCRIPT'
 set -euo pipefail
 mkdir -p /run/sshd /run/mysqld /root/.ssh

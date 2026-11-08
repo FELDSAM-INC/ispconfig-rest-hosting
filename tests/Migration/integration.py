@@ -181,8 +181,233 @@ def check_sites(config, mode):
     assert any('--new-ip' in warning for warning in report['warnings']), report['warnings']
 
 
+PLESK_HOME = Path('/var/www/vhosts/shop.test')
+PLESK_SHADOW = '$AES-128-CBC$Zm9v+YmFy/w==$cXV4'
+
+
+class PleskFakeApi(FakeApi):
+    """The target contract of FakeApi plus subdomains with their own folder, cron jobs and the client's plan."""
+    next_id = 105
+
+    def get(self, path):
+        if path == '/clients/3':
+            return dict(super().get(path), limit_wildcard=True, limit_cron_type='full', limit_cron_frequency=5)
+        return super().get(path)
+
+    def request(self, method, endpoint, payload):
+        if method == 'POST' and (endpoint == '/sites/cron-jobs' or endpoint == '/sites/web-domains' and payload.get('type') == 'vhostsubdomain'):
+            assert self.key == 'test-scoped-key'
+            self.posts += 1
+            PleskFakeApi.next_id += 1
+            row = dict(payload, id=PleskFakeApi.next_id, sys_groupid=3)
+            if endpoint == '/sites/web-domains':
+                row['document_root'] = self.rows['/sites/web-domains/104']['document_root']
+                row['hd_quota'] = 0  # ISPConfig: children share the parent's quota
+            self.rows['%s/%d' % (endpoint, row['id'])] = row
+            return row, None
+        if method == 'POST' and endpoint in ('/sites/database-users', '/sites/databases'):
+            # Two databases: own IDs, and quotas that share the client's 1024 MB.
+            assert self.key == 'test-scoped-key'
+            self.posts += 1
+            PleskFakeApi.next_id += 1
+            row = dict(payload, id=PleskFakeApi.next_id, sys_groupid=3)
+            if endpoint == '/sites/database-users':
+                row['database_user_prefix'] = 'c3'
+                sql("CREATE USER 'c3%s'@'localhost' IDENTIFIED BY '%s';" % (payload['database_user'], payload['database_password']))
+            else:
+                assert 0 < payload['database_quota'] < 1024, payload
+                row['database_name_full'] = 'c3' + payload['database_name']
+                user = 'c3' + self.rows['/sites/database-users/%d' % payload['database_user_id']]['database_user']
+                sql("CREATE DATABASE `%s`; GRANT ALL ON `%s`.* TO '%s'@'localhost';" % (row['database_name_full'], row['database_name_full'], user))
+            self.rows['%s/%d' % (endpoint, row['id'])] = row
+            return row, None
+        return super().request(method, endpoint, payload)
+
+
+def plesk_fixture():
+    """A Plesk server in the container: `plesk db` over a psa schema, the subscription's system user and its crontab."""
+    Path('/usr/local/psa').mkdir(parents=True)
+    Path('/usr/local/psa/version').write_text('18.0.81 Ubuntu 24.04 1800261102.16\n')
+    Path('/usr/local/bin/plesk').write_text('#!/bin/sh\n[ "$1" = db ] || { echo "fake plesk: $*" >&2; exit 1; }\nshift\nexec mysql psa "$@"\n')
+    Path('/usr/local/bin/plesk').chmod(0o755)
+    Path('/etc/psa').mkdir()
+    Path('/etc/psa/.psa.shadow').write_text(PLESK_SHADOW + '\n')
+    Path('/etc/psa/.psa.shadow').chmod(0o600)
+    sql("""CREATE USER 'admin'@'localhost' IDENTIFIED BY '%s'; GRANT ALL ON *.* TO 'admin'@'localhost';
+        CREATE DATABASE psa;
+        CREATE TABLE psa.domains(id INT, name VARCHAR(255), htype VARCHAR(16), status INT, webspace_id INT, parentDomainId INT, cl_id INT);
+        CREATE TABLE psa.hosting(dom_id INT, www_root VARCHAR(255), sys_user_id INT, php_handler_id VARCHAR(64));
+        CREATE TABLE psa.sys_users(id INT, login VARCHAR(64), home VARCHAR(255), shell VARCHAR(255));
+        CREATE TABLE psa.clients(id INT, login VARCHAR(64), cname VARCHAR(255), pname VARCHAR(255));
+        CREATE TABLE psa.domain_aliases(id INT, dom_id INT, name VARCHAR(255), status INT, web ENUM('false','true'), seoRedirect ENUM('false','true'));
+        CREATE TABLE psa.data_bases(id INT, name VARCHAR(64), type VARCHAR(16), dom_id INT, db_server_id INT, default_user_id INT);
+        CREATE TABLE psa.db_users(id INT, login VARCHAR(64), db_id INT, dom_id INT);
+        CREATE TABLE psa.DatabaseServers(id INT, host VARCHAR(255), port INT, type VARCHAR(16));
+        CREATE TABLE psa.IP_Addresses(id INT, ip_address VARCHAR(64));
+        CREATE TABLE psa.DomainsTraffic(dom_id INT, date DATE, http_in BIGINT, http_out BIGINT);
+        INSERT INTO psa.domains VALUES (1,'shop.test','vrt_hst',0,0,0,1), (2,'_.shop.test','vrt_hst',0,1,1,1),
+            (3,'blog.shop.test','vrt_hst',0,1,1,1), (4,'addon.test','vrt_hst',0,1,0,1);
+        INSERT INTO psa.hosting VALUES (1,'%s/httpdocs',1,'alt-php81-fpm'), (2,'%s/httpdocs',1,'alt-php81-fpm'),
+            (3,'%s/httpdocs/blog',1,'alt-php81-fpm'), (4,'%s/addon.test',1,'alt-php81-fpm');
+        INSERT INTO psa.sys_users VALUES (1,'shopuser','%s','/usr/local/psa/bin/chrootsh');
+        INSERT INTO psa.clients VALUES (1,'shop','Shop s.r.o.','Jana');
+        INSERT INTO psa.domain_aliases VALUES (1,1,'shop.example',0,'true','true');
+        INSERT INTO psa.data_bases VALUES (11,'shop_wp','mysql',1,1,NULL), (12,'shop-old_db','mysql',1,1,22);
+        INSERT INTO psa.db_users VALUES (21,'shop_wpuser',11,1), (22,'shop_old',12,1);
+        INSERT INTO psa.DatabaseServers VALUES (1,'localhost',3306,'mysql');
+        INSERT INTO psa.IP_Addresses VALUES (1,'127.0.0.1');
+        INSERT INTO psa.DomainsTraffic VALUES (1,CURDATE(),100,2000);
+        CREATE DATABASE shop_wp; CREATE TABLE shop_wp.items(id INT PRIMARY KEY, content LONGBLOB) ENGINE=InnoDB;
+        INSERT INTO shop_wp.items VALUES (1, 0x00736563726574);
+        CREATE DATABASE `shop-old_db`; CREATE TABLE `shop-old_db`.notes(id INT PRIMARY KEY, body TEXT);
+        INSERT INTO `shop-old_db`.notes VALUES (1, 'old');""" % ((PLESK_SHADOW,) + (str(PLESK_HOME),) * 5))
+    subprocess.run(['groupadd', 'psacln'], check=True)
+    subprocess.run(['useradd', '-g', 'psacln', '-d', str(PLESK_HOME), '-M', 'shopuser'], check=True)
+    httpdocs = PLESK_HOME / 'httpdocs'
+    for path in (httpdocs / 'wp-content/uploads', httpdocs / 'blog', PLESK_HOME / 'private-data', PLESK_HOME / 'addon.test', PLESK_HOME / 'logs'):
+        path.mkdir(parents=True, exist_ok=True)
+    httpdocs.joinpath('index.php').write_text('<?php echo "shop";')
+    httpdocs.joinpath('wp-config.php').write_text("<?php\nfile_put_contents('/tmp/ispcp-customer-code-executed','bad');\n"
+                                                  "define('DB_NAME','shop_wp');\ndefine('DB_USER','shop_wpuser');\n"
+                                                  "define('DB_PASSWORD','old secret');\ndefine('DB_HOST','localhost');\n")
+    httpdocs.joinpath('.user.ini').write_text("auto_prepend_file = '%s/httpdocs/wordfence-waf.php'\n" % PLESK_HOME)
+    httpdocs.joinpath('wp-content/uploads/photo.txt').write_text('photo')
+    httpdocs.joinpath('media').symlink_to(str(httpdocs / 'wp-content/uploads'))
+    httpdocs.joinpath('blog/index.html').write_text('blog')
+    httpdocs.joinpath('delete-on-sync.txt').write_text('delete later')
+    (PLESK_HOME / 'private-data/secret.txt').write_text('not migrated')
+    (PLESK_HOME / 'addon.test/index.html').write_text('another website')
+    subprocess.run(['chown', '-R', 'shopuser:psacln', str(PLESK_HOME)], check=True)
+    for path in (Path('/var/www'), Path('/var/www/vhosts')):
+        path.chmod(0o755)
+    PLESK_HOME.chmod(0o710)
+    crontab = ('MAILTO=""\nSHELL="/bin/sh"\n#@desc: Running wp-cron.php for WordPress at https://shop.test\n'
+               "3,33\t*\t*\t*\t*\t/opt/alt/php81/usr/bin/php -f 'httpdocs/wp-cron.php'\n"
+               '0 * * * * php %s/addon.test/cron.php\n' % PLESK_HOME)
+    subprocess.run(['crontab', '-u', 'shopuser', '-'], input=crontab.encode(), check=True)
+
+
+def plesk_main():
+    """Plesk source: inventory, --sites, plan, privilege-dropped reads, provisioning, publish and final sync."""
+    os.umask(0o077)
+    subprocess.run(['groupadd', 'client3'], check=True)
+    subprocess.run(['useradd', '-g', 'client3', 'web104'], check=True)
+    for path in [Path('/var/www/clients'), Path('/var/www/clients/client3')]:
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o755)
+    config_dir = Path('/usr/local/ispconfig/server/lib')
+    config_dir.mkdir(parents=True)
+    (config_dir / 'config.inc.php').write_text("<?php $conf=array('server_id'=>1,'db_host'=>'localhost','db_user'=>'root','db_password'=>'','db_database'=>'dbispconfig');")
+    plesk_fixture()
+    install_tool()
+    m.HERE = Path('/usr/local/lib/ispconfig-rest-migration')
+    config = m.select_source({
+        'source': {'panel_ssh': 'root@unused.invalid', 'web_ssh': 'root@unused.invalid', 'db_ssh': {'1': 'root@unused.invalid'}},
+        'sources': {'plesk': {'type': 'plesk', 'ssh': 'root@127.0.0.1'}},
+        'target': {'api_url': 'https://panel.example/api/v1', 'api_key_file': '/unused', 'web_ssh': 'root@target-no-ssh.invalid',
+                   'db_ssh': 'root@127.0.0.1', 'web_server_id': 1, 'db_server_id': 1, 'db_host': 'db.example',
+                   'db_remote_ips': '10.20.30.21,10.20.30.20'},
+    }, 'plesk')
+    dns = FakeDns({'shop.test': [('A', '127.0.0.1')], 'www.shop.test': [('CNAME', 'shop.test')], 'addon.test': [('A', '203.0.113.9')]})
+    try:
+        report = m.site_inventory(config, resolvers=[dns.address])
+    finally:
+        dns.close()
+    sites = {site['domain']: site for site in report['websites']}
+    assert (sites['shop.test']['status'], sites['shop.test']['databases'], sites['shop.test']['traffic_30d_bytes']) == ('old', 2, 2100), sites
+    assert sites['shop.test']['hostnames'][:4] == ['shop.test', 'www.shop.test', 'shop.example', 'www.shop.example'], sites['shop.test']
+    assert (sites['addon.test']['status'], sites['addon.test']['parent']) == ('other', 'shop.test'), sites['addon.test']
+    assert report['old_addresses'] == {'127.0.0.1': '127.0.0.1'}, report['old_addresses']
+    m.Api = PleskFakeApi
+    temporary = set(os.listdir('/tmp'))
+    with tempfile.TemporaryDirectory(prefix='migration-test-') as state:
+        migration = m.Migration(config, state, 'shop.test', 3)
+        migration.plan()
+        assert FakeApi.posts == 0
+        inventory = migration.state['inventory']
+        assert inventory['site']['subdomain'] == '*' and inventory['site']['system_user'] == 'shopuser'
+        assert [(child['domain'], child['type']) for child in inventory['children']] == [('blog.shop.test', 'vhostsubdomain'), ('shop.example', 'alias')]
+        assert inventory['not_copied'] == ['private-data'], inventory['not_copied']
+        assert [job['source'] for job in migration.state['cron_jobs']] == ["/opt/alt/php81/usr/bin/php -f 'httpdocs/wp-cron.php'"]
+        sizes = migration.state['source_size']
+        assert sizes['web_bytes'] > 0 and sizes['databases']['shop_wp'] > 0 and 'shop-old_db' in sizes['databases'], sizes
+        # Files are read as the subscription's user: something only root can read stops the copy.
+        unreadable = PLESK_HOME / 'httpdocs/root-only.txt'
+        unreadable.write_text('root only')
+        unreadable.chmod(0o600)
+        try:
+            migration.run(source_quiesced=True)
+        except m.MigrationError as exc:
+            assert 'rsync' in str(exc), str(exc)
+        else:
+            raise AssertionError('root-only source file copied')
+        unreadable.unlink()
+        Path('/var/www/clients/client3/web104').chmod(0o755)
+        migration = m.Migration(config, state, 'shop.test', 3)
+        try:
+            migration.run(source_quiesced=True)
+        except m.MigrationError as exc:
+            assert 'Edit configs in the staged tree' in str(exc), str(exc)
+        else:
+            raise AssertionError('old webspace path in .user.ini published without review')
+        tree = Path(state) / 'round-000/tree'
+        report = m.read_json(tree.parent / 'configuration-report.json')
+        assert report['old_path_references'] == ['web/.user.ini'] and report['wordpress_updated'] == ['web/wp-config.php'], report
+        target_root = Path('/var/www/clients/client3/web104')
+        (tree / 'web/.user.ini').write_text("auto_prepend_file = '%s/web/wordfence-waf.php'\n" % target_root)
+        migration.publish(config_reviewed=True)
+        assert migration.state['phase'] == 'copied'
+        assert (target_root / 'web/index.php').read_text() == '<?php echo "shop";'
+        assert (target_root / 'web/blog/index.html').read_text() == 'blog'
+        assert os.readlink(target_root / 'web/media') == 'wp-content/uploads' and (target_root / 'web/media/photo.txt').read_text() == 'photo'
+        assert not list(target_root.rglob('secret.txt')) and not (target_root / 'web/addon.test').exists()
+        assert (target_root / 'web/index.php').stat().st_uid == __import__('pwd').getpwnam('web104').pw_uid
+        assert not Path('/tmp/ispcp-customer-code-executed').exists()
+        for key, query in (('shop_wp', 'SELECT HEX(content) FROM `%s`.items'), ('shop-old_db', 'SELECT body FROM `%s`.notes')):
+            assert sql(query % migration.state['databases'][key]['name']) == sql(query % key), key
+        wp = migration.state['databases']['shop_wp']
+        target_wp = (target_root / 'web/wp-config.php').read_text()
+        assert wp['name'] in target_wp and wp['password'] in target_wp and "'db.example'" in target_wp
+        rows = PleskFakeApi.rows
+        site = rows['/sites/web-domains/104']
+        assert (site['subdomain'], site['domain']) == ('*', 'shop.test'), site
+        alias = rows['/sites/web-child-domains/104']
+        assert (alias['domain'], alias['redirect_type'], alias['redirect_path']) == ('shop.example', 'R=301,L', '[scheme]://shop.test/'), alias
+        blog = [row for key, row in rows.items() if key.startswith('/sites/web-domains/') and row.get('type') == 'vhostsubdomain']
+        assert [(row['domain'], row['web_folder']) for row in blog] == [('blog.shop.test', 'web/blog')], blog
+        cron = [row for key, row in rows.items() if key.startswith('/sites/cron-jobs/')]
+        assert [(row['command'], row['active'], row['run_min']) for row in cron] == [
+            ('/usr/bin/php -f %s/web/wp-cron.php' % target_root, False, '3,33')], cron
+        # Final sync: new source rows and files, deleted files; the reviewed path is checked again.
+        sql("INSERT INTO shop_wp.items VALUES (2, 'new');")
+        (PLESK_HOME / 'httpdocs/delete-on-sync.txt').unlink()
+        (PLESK_HOME / 'httpdocs/new.txt').write_text('new file')
+        subprocess.run(['chown', 'shopuser:psacln', str(PLESK_HOME / 'httpdocs/new.txt')], check=True)
+        crontab = subprocess.run(['crontab', '-l', '-u', 'shopuser'], check=True, capture_output=True).stdout
+        subprocess.run(['crontab', '-u', 'shopuser', '-'], input=crontab + b'5 5 * * * /opt/alt/php81/usr/bin/php -f httpdocs/new.php\n', check=True)
+        posts = FakeApi.posts
+        try:
+            migration.run(sync=True, source_quiesced=True, target_quiesced=True)
+        except m.MigrationError as exc:
+            assert 'Edit configs in the staged tree' in str(exc), str(exc)
+        (Path(state) / 'round-001/tree/web/.user.ini').write_text("auto_prepend_file = '%s/web/wordfence-waf.php'\n" % target_root)
+        migration.publish(config_reviewed=True)
+        assert sql('SELECT COUNT(*) FROM `%s`.items' % wp['name']) == '2'
+        assert not (target_root / 'web/delete-on-sync.txt').exists() and (target_root / 'web/new.txt').read_text() == 'new file'
+        assert FakeApi.posts == posts, 'sync must not create objects again'
+        assert [job['source'] for job in migration.state['cron_jobs']] == ["/opt/alt/php81/usr/bin/php -f 'httpdocs/wp-cron.php'"]
+        assert 'old secret' not in (Path(state) / 'state.json').read_text()
+    # Nothing was written on the Plesk side: no option files, sources unchanged.
+    assert not set(os.listdir('/tmp')) - temporary, set(os.listdir('/tmp')) - temporary
+    assert (PLESK_HOME / 'httpdocs/.user.ini').read_text().startswith("auto_prepend_file = '%s/httpdocs" % PLESK_HOME)
+    print('PASS (plesk): --sites, inventory, plan, reads as the subscription user, dumps as the Plesk admin, wildcard, alias redirect, '
+          'subdomain folder, inactive cron, old path review, WordPress config, symlinks, final sync')
+
+
 def main():
     assert Path('/.dockerenv').exists(), 'Never run fixture setup on a real host'
+    if os.environ.get('ISPCP_TEST_SOURCE_MODE') == 'plesk':
+        return plesk_main()
     os.umask(0o077)
     subprocess.run(['groupadd', 'client7'], check=True)
     subprocess.run(['groupadd', 'client3'], check=True)

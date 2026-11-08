@@ -7,6 +7,12 @@
       "port": 3306
     }
   },
+  "sources": {
+    "plesk": {
+      "type": "plesk",
+      "ssh": "root@plesk.example.net"
+    }
+  },
   "target": {
     "api_url": "https://panel.example.net:8090/api/v1",
     "api_key_file": "/root/.config/ispcp-migrate/api-key",

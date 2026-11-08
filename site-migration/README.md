@@ -1,4 +1,4 @@
-# Migrate an existing ISPConfig website into a WHMCS hosting account
+# Migrate an existing ISPConfig or Plesk website into a WHMCS hosting account
 
 First change the product and click **Create** in the WHMCS administrator area. That step stays manual.
 This utility then creates the website and its database users/databases under the resulting **new ISPConfig
@@ -194,6 +194,73 @@ default, so `/etc/hosts` overrides and a server's own copy of a zone do not chan
 `--resolver IP` for another recursive resolver. `TRAFFIC 30D` sums the old panel's `web_traffic` for the last
 30 days. Inactive websites (`ACT n`) are listed too, but ISPConfig does not serve them.
 
+## Migrating from Plesk
+
+The same commands migrate websites of a **Plesk Obsidian (Linux)** server; `--from plesk` selects it. Add the
+Plesk server once under `sources` in `/etc/ispconfig-rest-migration/config.json`; the `target` settings and
+`state_dir` are shared, and existing ISPConfig migrations are not affected (`sources` is not part of a
+migration's configuration fingerprint):
+
+```json
+"sources": {"plesk": {"type": "plesk", "ssh": "root@plesk.example.net"}}
+```
+
+Root SSH from the new web server to the Plesk server uses a key and a verified host key, as for the old ISPConfig.
+The Plesk server needs only its own `python3` (CloudLinux/RHEL 8 `platform-python` 3.6 is enough), `rsync`,
+`setpriv`, `crontab` and `mysqldump`. Nothing is installed or written there:
+
+- Plesk's metadata comes from `plesk db` **SELECT** statements (domains, hosting, aliases, databases and their
+  users, IP addresses, 30-day traffic). The Plesk REST API would need a key created on the server and lacks the
+  PHP handler, the system user and the traffic; the CLI utilities print text only.
+- Files and sizes are read **as the subscription's system user** (`setpriv`), so a symlink a customer places in the
+  webspace cannot make root read other files. A file that user cannot read stops the copy.
+- Databases are dumped as the Plesk administrator (`/etc/psa/.psa.shadow`); the password reaches `mysqldump` through
+  a pipe, not a file or the command line.
+
+```bash
+ispcp-migrate --sites --from plesk              # which Plesk websites are live (DNS), as above
+ispcp-migrate --from plesk example.com 123 --plan
+ispcp-migrate --from plesk example.com 123 --php 8.2
+```
+
+What is migrated, per Plesk domain with website hosting (a suspended or disabled domain stops the plan):
+
+| Plesk | New ISPConfig website |
+| --- | --- |
+| Document root (`httpdocs`, or an additional domain's folder) | `web/` (`private/` stays empty) |
+| `www.` and the wildcard subdomain `*.example.com` in the same folder | `subdomain` `www` or `*` (`*` needs `limit_wildcard` in the client's plan; checked before any write) |
+| Domain alias used for the website | Alias domain; Plesk's SEO-safe 301 becomes a 301 redirect to `[scheme]://example.com/` |
+| Subdomain in the same folder | Subdomain |
+| Subdomain with its folder inside the document root (`httpdocs/blog`) | Subdomain with its own web folder (`web/blog`) |
+| Local MySQL/MariaDB databases Plesk assigns to the domain | New databases and users; WordPress configs using any of the database's Plesk users are updated |
+| Cron jobs of the subscription's system user | ISPConfig cron jobs, created **inactive** |
+
+The plan lists everything else: subdomains or additional domains of the subscription with their own folder
+(migrate each one separately, `ispcp-migrate --from plesk sub.example.com 123`), aliases used only for mail or DNS,
+forwarding subdomains, files of the webspace outside the document root (e.g. `wordpress-backups`), and databases
+assigned to another domain of the subscription. Plesk often assigns all databases to the subscription's main
+domain: `--database NAME` (repeatable) migrates exactly these databases of the subscription instead, e.g. the one an
+additional domain's WordPress uses. The source PHP version comes from the Plesk handler (`alt-php74-fpm` → 7.4);
+the plan prints it and suggests `--php` when the new website would differ. Per-domain PHP settings, mail, DNS,
+certificates and Plesk extensions (WP Toolkit, Imunify) are not migrated.
+
+**Cron jobs.** Paths in the subscription's webspace are rewritten: relative ones (`httpdocs/wp-cron.php`, Plesk runs
+jobs in the webspace), chroot ones (`/httpdocs/…`) and absolute ones (`/var/www/vhosts/example.com/httpdocs/…`)
+become `/var/www/clients/clientN/webM/web/…` for `full` cron jobs, or `/web/…` inside the jail for `chrooted` ones (the
+client's `limit_cron_type`). The CloudLinux/Plesk PHP binary (`/opt/alt/php74/usr/bin/php`) becomes the CLI of
+the new website's PHP version; `curl`/`wget` of one URL becomes an ISPConfig URL job. A trailing `>/dev/null 2>&1`
+is kept. Jobs with other shell syntax (pipes, `&&`, variables, globs, `%`), schedules ISPConfig cannot store
+(`@reboot`, `*/1`), paths outside the migrated folders, jobs more frequent than `limit_cron_frequency` and command jobs
+of a URL-only plan are listed as `MANUAL` and not created. Duplicate jobs are created once. Jobs without webspace
+paths belong to the subscription's main domain. All created jobs are **inactive**: the old server keeps running
+them until the DNS switch, so enable them in ISPConfig/WHMCS then and stop them in Plesk.
+
+**Old paths.** Configuration files in the copy that still name the old webspace (`.htaccess`, `.user.ini`,
+`php.ini`, `.env`, `wp-config.php`, `wordfence-waf.php`, PHP/ini files directly in the document root) are listed
+in `configuration-report.json` (`old_path_references`) and stop publication for review, like other manual
+configuration: for example Wordfence's `auto_prepend_file`, which would stop PHP on the new server. Edit the
+staged copy, then repeat the command and confirm.
+
 ## One website: domain and client ID
 
 After changing the product and clicking **Create** in WHMCS, run this on the new web server as root:
@@ -378,5 +445,12 @@ website, alias, database user and databases with every quota derived from the cl
 size-proportional database split and unlimited plans), and proves that count limits and source sizes that do not
 fit stop before any write. The 10 GB website request still fails for a 5 GB account and an existing allocation
 reduces the new quota.
+The `plesk` variant of the integration test runs a Plesk source in the container (`plesk db` over a `psa` schema,
+the subscription's system user and crontab, the administrator password file): `--sites`, the inventory and plan,
+reads as the subscription user (a root-only file stops the copy), dumps as the Plesk administrator including a
+database name with a hyphen, the wildcard, the alias redirect, a subdomain folder, an inactive cron job with
+rewritten paths, the old-path review, WordPress configuration and a final sync, and that nothing is written on the
+Plesk side. `MigrationProvisioningTest` also provisions a Plesk inventory through the real API, including the
+wildcard and cron limits that stop before any write.
 These tests are **not a live ISPConfig instance**. A first production migration must
 start with `plan` and an application test before DNS changes.

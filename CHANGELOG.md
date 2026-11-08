@@ -5,6 +5,20 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `ispcp-migrate --from plesk` migrates websites of a Plesk Obsidian (Linux) server, and `ispcp-migrate --sites --from
+  plesk` lists which of them are live. The Plesk server is configured once under `sources` in the configuration; it
+  needs only root SSH and its own Python 3.6+, and nothing is written there: metadata comes from `plesk db` SELECTs,
+  files and sizes are read as the subscription's system user, dumps run as the Plesk administrator with the password
+  passed through a pipe. The document root becomes `web/`; `www.` and a wildcard subdomain, aliases (Plesk's 301 to the
+  domain included), subdomains in the same folder or inside the document root, the domain's local MySQL/MariaDB
+  databases (`--database NAME` selects others of the subscription) and the subscription's cron jobs are migrated. Cron
+  jobs get the new paths and PHP CLI and are created **inactive**; jobs ISPConfig or the client's plan cannot run are
+  listed for manual review. Configuration files that still name the old webspace (e.g. Wordfence's `.user.ini`) stop
+  publication for review. Everything else is listed in the plan. A wildcard subdomain the client's plan does not allow
+  stops the migration before any write, for ISPConfig sources too.
+
 ## [1.3.4] - 2026-11-08
 
 ### Fixed

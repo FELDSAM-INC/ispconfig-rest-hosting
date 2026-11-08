@@ -46,6 +46,7 @@ def main():
         migration = m.Migration(request['config'], state, request['domain'], request['client_id'])
         migration.state['inventory'] = request['inventory']
         migration.state['source_size'] = request['source_size']
+        migration.state['cron_jobs'] = request.get('cron_jobs', [])
         migration.check_target = lambda: None
         migration.db_io = lambda *args, **kwargs: None
         if request.get('legacy_database_payload'):

@@ -263,6 +263,100 @@ PY;
         }
     }
 
+    /**
+     * A Plesk website as plesk_inventory() returns it: aliases (one with Plesk's 301 to the domain), a subdomain in
+     * the same folder and one in its own folder inside the document root, a wildcard, and cron jobs created inactive.
+     */
+    private function pleskMigration(array $cronJobs): array
+    {
+        $request = $this->migration(['shop_wp' => 10 * self::MB, 'shop-old_db' => self::MB], ['domain' => 'shop.test']);
+        $request['config']['source'] = ['type' => 'plesk', 'ssh' => 'root@plesk.test'];
+        $request['inventory'] = [
+            'source' => 'plesk',
+            'site' => ['domain_id' => 1, 'server_id' => 'plesk', 'domain' => 'shop.test', 'type' => 'vhost',
+                'document_root' => '/var/www/vhosts/shop.test', 'www_root' => '/var/www/vhosts/shop.test/httpdocs',
+                'system_user' => 'shopuser', 'system_group' => 'psacln', 'uid' => 10001, 'gid' => 1004, 'php' => 'php-fpm',
+                'php_handler' => 'alt-php81-fpm', 'php_version' => '8.1', 'server_php_id' => 0, 'subdomain' => '*', 'active' => 'y',
+                'subscription' => 'shop.test'],
+            'databases' => [
+                ['database_id' => 11, 'server_id' => 1, 'database_name' => 'shop_wp', 'database_charset' => 'utf8mb4', 'type' => 'mysql',
+                    'active' => 'y', 'database_user' => 'shop_wpuser', 'database_users' => ['shop_all', 'shop_wpuser']],
+                ['database_id' => 12, 'server_id' => 1, 'database_name' => 'shop-old_db', 'database_charset' => '', 'type' => 'mysql',
+                    'active' => 'y', 'database_user' => 'shop_old', 'database_users' => ['shop_old']],
+            ],
+            'children' => [
+                ['domain_id' => 'a1', 'domain' => 'shop.example', 'type' => 'alias', 'subdomain' => 'www', 'redirect_type' => 'R=301,L',
+                    'redirect_path' => '[scheme]://shop.test/', 'active' => 'y'],
+                ['domain_id' => 's4', 'domain' => 'same.shop.test', 'type' => 'subdomain', 'subdomain' => 'none', 'redirect_type' => '',
+                    'redirect_path' => '', 'active' => 'y'],
+                ['domain_id' => 's3', 'domain' => 'blog.shop.test', 'type' => 'vhostsubdomain', 'subdomain' => 'www', 'web_folder' => 'web/blog',
+                    'php_version' => '7.4', 'redirect_type' => '', 'redirect_path' => '', 'active' => 'y'],
+            ],
+            'cron' => [], 'notes' => [], 'not_copied' => [], 'servers' => [],
+        ];
+        $request['cron_jobs'] = $cronJobs;
+
+        return $request;
+    }
+
+    public function test_plesk_children_and_inactive_cron_jobs_pass_the_api(): void
+    {
+        foreach (['limit_web_aliasdomain' => 1, 'limit_web_subdomain' => 2, 'limit_cron' => 2, 'limit_cron_frequency' => 5,
+            'limit_database' => 2, 'limit_database_user' => 2] as $limit => $value) {
+            $this->setClientLimit('clientB', $limit, $value);
+        }
+        DB::table('client')->where('client_id', $this->tenant('clientB')['client_id'])->update(['limit_cron_type' => 'full', 'limit_wildcard' => 'y']);
+        $wpCron = ['schedule' => ['3,33', '*', '*', '*', '*'], 'source' => "/opt/alt/php74/usr/bin/php -f 'httpdocs/wp-cron.php'",
+            'description' => null, 'words' => [['php' => '/opt/alt/php74/usr/bin/php'], '-f', ['prefix' => '', 'path' => 'web/wp-cron.php']],
+            'suffix' => '>/dev/null 2>&1', 'create' => true, 'reason' => null, 'type' => 'full', 'php_cli' => '/usr/bin/php'];
+        $fetch = ['schedule' => ['0', '*', '*', '*', '*'], 'source' => "curl -fsS 'https://shop.test/cron'", 'description' => null,
+            'url' => 'https://shop.test/cron', 'create' => true, 'reason' => null, 'type' => 'url', 'php_cli' => '/usr/bin/php'];
+        $manual = ['schedule' => ['0', '1', '*', '*', '*'], 'source' => 'cd /httpdocs && php run.php', 'description' => null,
+            'reason' => 'shell syntax', 'create' => false, 'type' => 'full', 'php_cli' => '/usr/bin/php'];
+        [$result, $calls] = $this->runMigration($this->pleskMigration([$wpCron, $fetch, $manual]));
+        $this->assertTrue($result['ok'], $result['error'] ?? '');
+        $key = $result['state']['client_key']['id'];
+        $this->assertSame([
+            'POST /system/api-keys 201', 'PUT /system/api-keys/'.$key.' 200', 'POST /sites/web-domains 201',
+            'POST /sites/web-child-domains 201', 'POST /sites/web-child-domains 201', 'POST /sites/web-domains 201',
+            'POST /sites/database-users 201', 'POST /sites/databases 201', 'POST /sites/database-users 201', 'POST /sites/databases 201',
+            'POST /sites/cron-jobs 201', 'POST /sites/cron-jobs 201', 'PUT /system/api-keys/'.$key.' 200',
+        ], $this->writes($calls));
+        $site = DB::table('web_domain')->where('type', 'vhost')->first();
+        $this->assertSame(['shop.test', '*'], [$site->domain, $site->subdomain]);
+        $alias = DB::table('web_domain')->where('type', 'alias')->first();
+        $this->assertSame(['shop.example', 'R=301,L', '[scheme]://shop.test/'], [$alias->domain, $alias->redirect_type, $alias->redirect_path]);
+        $this->assertSame('same.shop.test', DB::table('web_domain')->where('type', 'subdomain')->value('domain'));
+        $blog = DB::table('web_domain')->where('type', 'vhostsubdomain')->first();
+        $this->assertSame(['blog.shop.test', 'web/blog', $site->document_root, (int) $site->domain_id],
+            [$blog->domain, $blog->web_folder, $blog->document_root, (int) $blog->parent_domain_id]);
+        $jobs = DB::table('cron')->orderBy('id')->get();
+        $this->assertSame([
+            ['full', 'n', '/usr/bin/php -f '.$site->document_root.'/web/wp-cron.php >/dev/null 2>&1', '3,33'],
+            ['url', 'n', 'https://shop.test/cron', '0'],
+        ], $jobs->map(fn ($job) => [$job->type, $job->active, $job->command, $job->run_min])->all());
+        $this->assertSame((int) $site->domain_id, (int) $jobs[0]->parent_domain_id);
+        $this->assertEqualsCanonicalizing(['shop-old_db', 'shop_wp'], array_keys($result['state']['databases']));
+        $this->assertSame(['shop_all', 'shop_wpuser'], $result['state']['databases']['shop_wp']['old_users']);
+
+        // Without wildcard subdomains in the plan, or room for every cron job, nothing is written.
+        DB::table('cron')->delete();
+        DB::table('web_domain')->delete();
+        DB::table('web_database')->delete();
+        DB::table('web_database_user')->delete();
+        DB::table('client')->where('client_id', $this->tenant('clientB')['client_id'])->update(['limit_wildcard' => 'n']);
+        [$refused, $calls] = $this->runMigration($this->pleskMigration([$wpCron, $fetch]));
+        $this->assertFalse($refused['ok']);
+        $this->assertStringStartsWith('The old website also serves *.shop.test (wildcard subdomain)', $refused['error']);
+        $this->assertSame([], $this->writes($calls));
+        DB::table('client')->where('client_id', $this->tenant('clientB')['client_id'])->update(['limit_wildcard' => 'y']);
+        $this->setClientLimit('clientB', 'limit_cron', 1);
+        [$refused, $calls] = $this->runMigration($this->pleskMigration([$wpCron, $fetch]));
+        $this->assertFalse($refused['ok']);
+        $this->assertStringStartsWith('Client limit for cron jobs is too small: limit 1, used 0, migration needs 2 more.', $refused['error']);
+        $this->assertSame([], $this->writes($calls));
+    }
+
     public function test_limits_that_cannot_fit_the_migration_stop_before_any_write(): void
     {
         $cases = [

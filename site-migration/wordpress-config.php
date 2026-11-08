@@ -46,7 +46,9 @@ try {
             }
         }
     }
-    if (!$mapping || $definitions['DB_USER']['value'] !== $expectedUser) { throw new RuntimeException('unmapped'); }
+    // A Plesk database can have several users; any of them identifies the same database.
+    $users = isset($mapping['old_users']) && is_array($mapping['old_users']) && $expectedUser === ($mapping['old_user'] ?? null) ? $mapping['old_users'] : array($expectedUser);
+    if (!$mapping || !in_array($definitions['DB_USER']['value'], $users, true)) { throw new RuntimeException('unmapped'); }
     foreach (array('DB_NAME'=>'name', 'DB_USER'=>'user', 'DB_PASSWORD'=>'password', 'DB_HOST'=>'host') as $constant=>$field) {
         $tokens[$definitions[$constant]['index']][1] = quoteValue($mapping[$field]);
     }

@@ -550,5 +550,216 @@ class SiteInventoryTests(unittest.TestCase):
                 m.source_sites(SITES_CONFIG)
 
 
+def plesk_domain(id, name, *, webspace=0, parent=0, root=None, home='/var/www/vhosts/shop.test', htype='vrt_hst', status=0,
+                 login='shopuser', handler='alt-php81-fpm', client='shop'):
+    return {'t': 'domain', 'id': id, 'name': name, 'htype': htype, 'status': status, 'webspace_id': webspace, 'parent_id': parent,
+            'www_root': root if htype == 'vrt_hst' else None, 'login': login if htype == 'vrt_hst' else None,
+            'home': home if htype == 'vrt_hst' else None, 'shell': '/usr/local/psa/bin/chrootsh', 'php_handler': handler,
+            'client': client, 'company': 'Shop s.r.o.', 'contact': 'Jana'}
+
+
+HOME = '/var/www/vhosts/shop.test'
+PLESK_ROWS = [
+    plesk_domain(1, 'shop.test', root=HOME + '/httpdocs'),
+    plesk_domain(2, '_.shop.test', webspace=1, parent=1, root=HOME + '/httpdocs'),
+    plesk_domain(3, 'blog.shop.test', webspace=1, parent=1, root=HOME + '/httpdocs/blog', handler='alt-php74-fpm'),
+    plesk_domain(4, 'same.shop.test', webspace=1, parent=1, root=HOME + '/httpdocs'),
+    plesk_domain(5, 'own.shop.test', webspace=1, parent=1, root=HOME + '/own.shop.test'),
+    plesk_domain(6, 'go.shop.test', webspace=1, parent=1, htype='std_fwd'),
+    plesk_domain(7, 'addon.test', webspace=1, root=HOME + '/addon.test'),
+    plesk_domain(8, 'off.test', root='/var/www/vhosts/off.test/httpdocs', home='/var/www/vhosts/off.test', status=16, login='off'),
+    plesk_domain(9, 'mail.test', htype='none'),
+    plesk_domain(10, 'nested.test', root='/var/www/vhosts/nested.test/httpdocs/public', home='/var/www/vhosts/nested.test', login='n'),
+    {'t': 'alias', 'id': 1, 'dom_id': 1, 'name': 'shop.example', 'status': 0, 'web': 'true', 'seo_redirect': 'true'},
+    {'t': 'alias', 'id': 2, 'dom_id': 1, 'name': 'shop.other', 'status': 0, 'web': 'true', 'seo_redirect': 'false'},
+    {'t': 'alias', 'id': 3, 'dom_id': 1, 'name': 'mail-only.test', 'status': 0, 'web': 'false', 'seo_redirect': 'false'},
+    {'t': 'database', 'id': 11, 'name': 'shop_wp', 'type': 'mysql', 'dom_id': 1, 'server_id': 1, 'default_user_id': None},
+    {'t': 'database', 'id': 12, 'name': 'shop-old_db', 'type': 'mysql', 'dom_id': 1, 'server_id': 1, 'default_user_id': 22},
+    {'t': 'database', 'id': 13, 'name': 'addon_wp', 'type': 'mysql', 'dom_id': 1, 'server_id': 1, 'default_user_id': None},
+    {'t': 'dbuser', 'id': 21, 'login': 'shop_wpuser', 'db_id': 11, 'dom_id': 1},
+    {'t': 'dbuser', 'id': 22, 'login': 'shop_old', 'db_id': 12, 'dom_id': 1},
+    {'t': 'dbuser', 'id': 23, 'login': 'shop_all', 'db_id': 0, 'dom_id': 1},
+    {'t': 'dbserver', 'id': 1, 'host': 'localhost', 'port': 3306, 'type': 'mysql'},
+    {'t': 'dbserver', 'id': 2, 'host': 'db.remote', 'port': 3306, 'type': 'mysql'},
+    {'t': 'charset', 'name': 'shop_wp', 'charset': 'utf8mb4'},
+    {'t': 'ip', 'address': '203.0.113.5'},
+    {'t': 'traffic', 'dom_id': 1, 'bytes': 2048},
+]
+PLESK_CRONTAB = """MAILTO=""
+SHELL="/bin/sh"
+#@desc: Running wp-cron.php for WordPress at https://shop.test
+3,33\t*\t*\t*\t*\t/opt/alt/php74/usr/bin/php -f 'httpdocs/wp-cron.php'
+3,33\t*\t*\t*\t*\t/opt/alt/php81/usr/bin/php -f 'httpdocs/wp-cron.php'
+SHELL="/usr/local/psa/bin/chrootsh"
+*/5 * * * * /opt/plesk/php/8.2/bin/php -q /var/www/vhosts/shop.test/httpdocs/blog/cron.php >/dev/null 2>&1
+0 4 * * * /httpdocs/tools/run --root=/httpdocs/var
+15 * * * * php /addon.test/cron.php
+0 * * * * curl -fsS 'https://shop.test/cron?token=x'
+0 * * * * wget -q -O /dev/null https://elsewhere.test/ping
+*/1 * * * * /httpdocs/fast.sh
+@reboot /httpdocs/start.sh
+0 1 * * * cd /httpdocs && php run.php
+0 2 * * * /httpdocs/copy.sh /logs/access_log
+"""
+PLESK_ACCOUNT = {'uid': 10001, 'gid': 1004, 'group': 'psacln', 'crontab': PLESK_CRONTAB,
+                 'entries': ['.cagefs', '.ssh', 'addon.test', 'bin', 'httpdocs', 'logs', 'own.shop.test', 'private-data', 'wordpress-backups']}
+
+
+class PleskTests(unittest.TestCase):
+    def inventory(self, domain='shop.test', **kwargs):
+        return m.plesk_inventory(PLESK_ROWS, PLESK_ACCOUNT, domain, **kwargs)
+
+    def test_website_children_and_notes_follow_the_plesk_layout(self):
+        inventory = self.inventory()
+        site = inventory['site']
+        self.assertEqual(('/var/www/vhosts/shop.test', HOME + '/httpdocs', 'shopuser', 'psacln', 10001, 1004, '8.1', '*', 'shop.test'),
+                         (site['document_root'], site['www_root'], site['system_user'], site['system_group'], site['uid'],
+                          site['gid'], site['php_version'], site['subdomain'], site['subscription']))
+        children = {child['domain']: child for child in inventory['children']}
+        self.assertEqual({'blog.shop.test', 'same.shop.test', 'shop.example', 'shop.other'}, set(children))
+        self.assertEqual(('vhostsubdomain', 'web/blog'), (children['blog.shop.test']['type'], children['blog.shop.test']['web_folder']))
+        self.assertEqual(('subdomain', 'none'), (children['same.shop.test']['type'], children['same.shop.test']['subdomain']))
+        self.assertEqual(('R=301,L', '[scheme]://shop.test/'), (children['shop.example']['redirect_type'], children['shop.example']['redirect_path']))
+        self.assertEqual(('', 'www'), (children['shop.other']['redirect_type'], children['shop.other']['subdomain']))
+        notes = '\n'.join(inventory['notes'])
+        for expected in ('own.shop.test has its own folder', 'go.shop.test has no website hosting', 'mail-only.test is not used',
+                         'Other websites of this Plesk subscription, migrated separately: addon.test', 'Duplicate cron job skipped'):
+            self.assertIn(expected, notes)
+        # Chroot/Plesk files are not reported; folders of the subscription's other websites neither.
+        self.assertEqual(['private-data', 'wordpress-backups'], inventory['not_copied'])
+
+    def test_databases_users_and_explicit_selection(self):
+        databases = {db['database_name']: db for db in self.inventory()['databases']}
+        self.assertEqual(['addon_wp', 'shop-old_db', 'shop_wp'], sorted(databases))
+        self.assertEqual(('shop_wpuser', ['shop_all', 'shop_wpuser'], 'utf8mb4'),
+                         (databases['shop_wp']['database_user'], databases['shop_wp']['database_users'], databases['shop_wp']['database_charset']))
+        self.assertEqual('shop_old', databases['shop-old_db']['database_user'])  # Plesk's default user
+        self.assertEqual('shop_all', databases['addon_wp']['database_user'])  # only the subscription-wide user
+        addon = m.plesk_inventory(PLESK_ROWS, PLESK_ACCOUNT, 'addon.test', databases=['addon_wp'])
+        self.assertEqual(['addon_wp'], [db['database_name'] for db in addon['databases']])
+        # Subdomains in the main website's folder go with it; one with its own folder is migrated on its own.
+        self.assertIn('Other websites of this Plesk subscription, migrated separately: own.shop.test, shop.test', '\n'.join(addon['notes']))
+        with self.assertRaisesRegex(m.MigrationError, 'Not a database of this Plesk subscription: other_db'):
+            self.inventory(databases=['other_db'])
+        remote = PLESK_ROWS + [{'t': 'database', 'id': 14, 'name': 'far', 'type': 'mysql', 'dom_id': 1, 'server_id': 2, 'default_user_id': None}]
+        with self.assertRaisesRegex(m.MigrationError, 'not on the local MySQL server'):
+            m.plesk_inventory(remote, PLESK_ACCOUNT, 'shop.test')
+
+    def test_websites_that_cannot_be_migrated_stop_with_the_reason(self):
+        for domain, message in (('off.test', 'suspended or disabled'), ('mail.test', 'no website hosting'),
+                                ('_.shop.test', 'wildcard subdomain'), ('nested.test', 'subfolder of the webspace folder'),
+                                ('missing.test', 'not on the Plesk server')):
+            with self.subTest(domain=domain), self.assertRaisesRegex(m.MigrationError, message):
+                m.plesk_site(PLESK_ROWS, domain)
+
+    def test_cron_jobs_map_webspace_paths_and_list_the_rest_for_review(self):
+        jobs = {job['source']: job for job in self.inventory()['cron']}
+        client = {'limit_cron_type': 'full', 'limit_cron_frequency': 5}
+        root = '/var/www/clients/client3/web9'
+
+        def target(source, cron_type='full'):
+            job = jobs[source]
+            self.assertIsNone(m.cron_decision(job, client), source)
+            return m.render_cron(job, document_root=root, cron_type=cron_type, php_cli='/usr/bin/php8.1')
+
+        self.assertEqual('/usr/bin/php8.1 -f %s/web/wp-cron.php' % root, target("/opt/alt/php74/usr/bin/php -f 'httpdocs/wp-cron.php'"))
+        self.assertEqual('/usr/bin/php8.1 -f /web/wp-cron.php', target("/opt/alt/php74/usr/bin/php -f 'httpdocs/wp-cron.php'", 'chrooted'))
+        self.assertEqual('/usr/bin/php8.1 -q %s/web/blog/cron.php >/dev/null 2>&1' % root,
+                         target('/opt/plesk/php/8.2/bin/php -q /var/www/vhosts/shop.test/httpdocs/blog/cron.php >/dev/null 2>&1'))
+        self.assertEqual('%s/web/tools/run --root=%s/web/var' % (root, root), target('/httpdocs/tools/run --root=/httpdocs/var'))
+        self.assertEqual('https://shop.test/cron?token=x', target("curl -fsS 'https://shop.test/cron?token=x'"))
+        self.assertEqual('Running wp-cron.php for WordPress at https://shop.test', jobs["/opt/alt/php74/usr/bin/php -f 'httpdocs/wp-cron.php'"]['description'])
+        # Another website's job stays with its own migration; a URL of another host belongs to the subscription.
+        self.assertNotIn('php /addon.test/cron.php', jobs)
+        self.assertIn('wget -q -O /dev/null https://elsewhere.test/ping', jobs)
+        for source, reason in (('/httpdocs/fast.sh', '\\*/1'), ('/httpdocs/start.sh', '@reboot'),
+                               ('cd /httpdocs && php run.php', 'shell syntax'), ('/httpdocs/copy.sh /logs/access_log', 'not migrated: logs/access_log')):
+            with self.subTest(source=source):
+                self.assertRegex(m.cron_decision(jobs[source], client), reason)
+        addon = m.plesk_inventory(PLESK_ROWS, PLESK_ACCOUNT, 'addon.test')
+        self.assertEqual(['php /addon.test/cron.php'], [job['source'] for job in addon['cron']])
+        self.assertEqual('php %s/web/cron.php' % root, m.render_cron(addon['cron'][0], document_root=root, cron_type='full', php_cli='php'))
+
+    def test_cron_limits_follow_the_client_plan(self):
+        job = {'schedule': ['*/5', '*', '*', '*', '*'], 'words': ['/web/run.sh'], 'suffix': ''}
+        self.assertRegex(m.cron_decision(job, {'limit_cron_type': 'url'}), 'only URL cron jobs')
+        self.assertIsNone(m.cron_decision(dict(job, url='https://a.test/'), {'limit_cron_type': 'url'}))
+        self.assertRegex(m.cron_decision(job, {'limit_cron_type': 'chrooted', 'limit_cron_frequency': 10}), 'every 5 minutes')
+        self.assertIsNone(m.cron_decision(job, {'limit_cron_type': 'chrooted', 'limit_cron_frequency': 5}))
+        # The same intervals as ISPConfig's validate_cron (CronJob::minIntervalMinutes).
+        for fields, interval in ((['27,57', '*', '*', '*', '*'], 30), (['0', '*', '*', '*', '*'], 60), (['*/5', '*', '*', '*', '*'], 5),
+                                 (['0', '3', '*', '*', '*'], 1440), (['0', '0', '1', '*', '*'], 1440), (['0', '0', '*', '*', '1,4,7'], 1440)):
+            with self.subTest(fields=fields):
+                self.assertEqual(interval, m.cron_interval(fields))
+        for name, minimum, maximum, value, valid in (('min', 0, 59, '*/1', False), ('min', 0, 59, '5-3', False), ('wday', 0, 7, 'mon', False),
+                                                     ('min', 0, 59, '0-30/10', True), ('hour', 0, 23, '24', False)):
+            with self.subTest(value=value):
+                self.assertEqual(valid, m.cron_field_valid(minimum, maximum, value))
+
+    def test_sites_inventory_lists_websites_aliases_and_traffic(self):
+        sites = {site['domain']: site for site in m.site_list(m.plesk_sites_inventory(PLESK_ROWS, 'plesk.test'))}
+        self.assertEqual({'shop.test', 'blog.shop.test', 'own.shop.test', 'go.shop.test', 'addon.test', 'off.test', 'nested.test'}, set(sites))
+        shop = sites['shop.test']
+        self.assertEqual(['shop.test', 'www.shop.test', 'same.shop.test', 'www.same.shop.test', 'shop.example', 'www.shop.example',
+                          'shop.other', 'www.shop.other'], shop['hostnames'])
+        self.assertEqual((3, 2048, 'shop Shop s.r.o.', 'plesk.test'), (shop['databases'], shop['traffic_30d_bytes'], shop['client'], shop['server']))
+        self.assertEqual(('vhostalias', 'shop.test'), (sites['addon.test']['type'], sites['addon.test']['parent']))
+        self.assertEqual(('vhostsubdomain', 'shop.test'), (sites['blog.shop.test']['type'], sites['blog.shop.test']['parent']))
+        self.assertFalse(sites['off.test']['active'])
+        self.assertEqual('forwarding', sites['go.shop.test']['redirect'])
+
+    def test_plesk_source_selection_keeps_existing_fingerprints(self):
+        target = {'api_url': 'https://panel.example/api/v1', 'api_key_file': '/unused', 'web_ssh': 'root@new',
+                  'db_ssh': 'root@db', 'web_server_id': 4, 'db_server_id': 5, 'db_host': 'db0'}
+        config = {'source': {'panel_ssh': 'root@old', 'web_ssh': 'root@old', 'db_ssh': {'1': 'root@old'}}, 'target': target}
+        with_sources = dict(config, sources={'plesk': {'type': 'plesk', 'ssh': 'root@plesk.test'}})
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second, patch.object(m, 'Api', MagicMock()):
+            self.assertEqual(m.Migration(config, first, 'example.com', 6).state['fingerprint'],
+                             m.Migration(m.select_source(with_sources, None), second, 'example.com', 6).state['fingerprint'])
+        plesk = m.select_source(with_sources, 'plesk')
+        self.assertEqual({'type': 'plesk', 'ssh': 'root@plesk.test'}, plesk['source'])
+        self.assertNotIn('sources', plesk)
+        with self.assertRaisesRegex(m.MigrationError, 'no source "cpanel"'):
+            m.select_source(with_sources, 'cpanel')
+        with tempfile.TemporaryDirectory() as state, patch.object(m, 'Api', MagicMock()):
+            self.assertEqual('plesk', m.Migration(plesk, state, 'shop.test', 6).kind)
+            with self.assertRaisesRegex(m.MigrationError, 'exactly "type": "plesk" and "ssh"'):
+                m.Migration(dict(plesk, source={'type': 'plesk', 'ssh': 'root@p', 'web_ssh': 'root@p'}), state, 'shop.test', 6)
+        args = m.parse_args(['--simple', 'shop.test', '6', '--from', 'plesk', '--database', 'a_db', '--database', 'b_db'])
+        self.assertEqual(('plesk', ['a_db', 'b_db']), (args.source_name, args.database))
+        self.assertEqual('plesk', m.parse_args(['--simple', '--sites', '--from', 'plesk']).source_name)
+
+    def test_helper_runs_with_the_python_of_rhel8_and_never_as_a_shell_string(self):
+        import ast
+        code = (TOOLS / 'plesk-source.py').read_text()
+        ast.parse(code, feature_version=(3, 6))
+        self.assertNotIn('capture_output', code)  # Python 3.7+
+        command = m.plesk_command('root@plesk.test')
+        self.assertEqual(['root@plesk.test'], command[-2:-1])
+        self.assertIn('/usr/libexec/platform-python', command[-1])
+
+    def test_staged_configuration_naming_the_old_webspace_is_reported(self):
+        with tempfile.TemporaryDirectory() as tree:
+            web = Path(tree, 'web')
+            (web / 'wp-content').mkdir(parents=True)
+            (web / '.user.ini').write_text("auto_prepend_file = '/var/www/vhosts/shop.test/httpdocs/wordfence-waf.php'\n")
+            (web / 'index.php').write_text('<?php // /var/www/vhosts/shop.test/httpdocs\n')
+            (web / 'wp-content/cache.php').write_text('/var/www/vhosts/shop.test/httpdocs/x')  # deeper PHP: not scanned
+            (web / 'wp-content/.htaccess').write_text('php_value include_path /var/www/vhosts/shop.test.old/x')  # other site
+            self.assertEqual(['web/.user.ini', 'web/index.php'], m.old_path_references(tree, '/var/www/vhosts/shop.test'))
+
+    def test_absolute_links_into_the_plesk_document_root_become_relative(self):
+        with tempfile.TemporaryDirectory() as tree:
+            (Path(tree) / 'web/wp-content').mkdir(parents=True)
+            (Path(tree) / 'private').mkdir()
+            (Path(tree) / 'web/wp-content/uploads').mkdir()
+            (Path(tree) / 'web/media').symlink_to(HOME + '/httpdocs/wp-content/uploads')
+            m.normalize_links(tree, [(HOME + '/httpdocs', 'web')])
+            self.assertEqual('wp-content/uploads', os.readlink(Path(tree) / 'web/media'))
+            (Path(tree) / 'web/logs').symlink_to(HOME + '/logs')
+            with self.assertRaisesRegex(m.MigrationError, 'External absolute symlink'):
+                m.normalize_links(tree, [(HOME + '/httpdocs', 'web')])
+
+
 if __name__ == '__main__':
     unittest.main()

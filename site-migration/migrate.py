@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Copy one old ISPConfig vhost into a client already provisioned by WHMCS.
+"""Copy one old ISPConfig vhost or Plesk website into a client already provisioned by WHMCS.
 
 No third-party Python modules. See README.md before using production credentials.
 """
@@ -68,7 +68,8 @@ def problem_summary(body):
     result = kind[len(prefix):]
     limit = problem.get('limit')
     names = ('limit_web_quota', 'limit_traffic_quota', 'limit_web_domain', 'limit_web_aliasdomain',
-             'limit_web_subdomain', 'limit_database', 'limit_database_user', 'limit_database_quota')
+             'limit_web_subdomain', 'limit_database', 'limit_database_user', 'limit_database_quota',
+             'limit_cron', 'limit_cron_frequency')
     if isinstance(limit, dict) and limit.get('name') in names:
         result += ': ' + limit['name']
         if limit.get('scope') in ('client', 'reseller'):
@@ -343,7 +344,7 @@ def php_configuration(rows, version, client_id):
 # Usage-summary count -> what the migration creates there.
 COUNT_LIMITS = {
     'web_domains': 'websites', 'web_alias_domains': 'alias domains', 'web_subdomains': 'subdomains',
-    'database_users': 'database users', 'databases': 'databases',
+    'database_users': 'database users', 'databases': 'databases', 'cron_jobs': 'cron jobs',
 }
 
 
@@ -364,8 +365,12 @@ def check_counts(summary, needed):
 
 
 def normalize_links(tree, old_root):
-    """Make absolute in-site links relative; reject links outside web/private."""
+    """Make absolute in-site links relative; reject links outside web/private.
+
+    old_root is the old website root (mirrored by the tree) or a list of (old directory, tree folder) pairs.
+    """
     tree = Path(tree).resolve()
+    roots = [(old_root, '')] if isinstance(old_root, str) else list(old_root)
     for directory, dirs, files in os.walk(tree, followlinks=False):
         for name in dirs + files:
             path = Path(directory) / name
@@ -376,8 +381,9 @@ def normalize_links(tree, old_root):
                 continue
             link = os.readlink(path)
             if os.path.isabs(link):
-                require(link.startswith(old_root + '/'), 'External absolute symlink: ' + str(path.relative_to(tree)))
-                target = tree / link[len(old_root) + 1:]
+                root = next(((old, folder) for old, folder in roots if link.startswith(old + '/')), None)
+                require(root is not None, 'External absolute symlink: ' + str(path.relative_to(tree)))
+                target = tree / root[1] / link[len(root[0]) + 1:]
                 link = os.path.relpath(target, path.parent)
                 path.unlink()
                 path.symlink_to(link)
@@ -393,7 +399,439 @@ def normalize_links(tree, old_root):
                         'Symlink leaves the migrated web/private folders: ' + str(path.relative_to(tree)))
 
 
+# --- Plesk source ----------------------------------------------------------------------------
+# plesk-source.py runs on the Plesk server (Python 3.6+) and only reads: `plesk db` SELECTs, the owner's
+# account and crontab, sizes and files as the subscription's system user, dumps as the Plesk administrator.
+SOURCE_TYPES = ('ispconfig', 'plesk')
+# Webspace entries Plesk, CloudLinux and the chroot shell create; anything else outside the document root is reported.
+PLESK_SYSTEM_ENTRIES = frozenset((
+    'bin', 'dev', 'etc', 'lib', 'lib64', 'usr', 'var', 'tmp', 'logs', 'error_docs', 'cgi-bin', '.cagefs', '.cl.selector',
+    '.imunify_patch_id', '.myimunify_id', '.bash_history', '.bash_logout', '.bash_profile', '.bashrc', '.profile',
+    '.ssh', '.cache', '.config', '.local', '.composer', '.nodenv', '.npm', '.wp-cli', '.mysql_history', '.lesshst',
+    '.viminfo', '.wget-hsts', '.python_history', '.gnupg', '.trash', '.wp-toolkit', '.secure_site_id'))
+FOLDER_PART = re.compile(r'[A-Za-z0-9_][A-Za-z0-9._-]*')
+CRON_FIELDS = (('run_min', 0, 59, 1), ('run_hour', 0, 23, 60), ('run_mday', 1, 31, 1440),
+               ('run_month', 1, 12, 40320), ('run_wday', 0, 7, 1440))
+CRON_ENTRY = re.compile(r'(?:([0-9]+)(?:-([0-9]+))?|\*)(?:/([1-9][0-9]*))?\Z')
+CRON_MACROS = {'@hourly': '0 * * * *', '@daily': '0 0 * * *', '@midnight': '0 0 * * *', '@weekly': '0 0 * * 0',
+               '@monthly': '0 0 1 * *', '@yearly': '0 0 1 1 *', '@annually': '0 0 1 1 *'}
+# Output discarded to /dev/null at the end of a command is kept as written; other shell syntax is reviewed by hand.
+CRON_REDIRECT = re.compile(r'\s+(?:(?:1?>|>>)\s*/dev/null(?:\s+2>&1)?|2>&1\s+(?:1?>|>>)\s*/dev/null|&>\s*/dev/null)\s*\Z')
+CRON_PHP = re.compile(r'(?:/opt/alt/php[0-9]+/usr/bin/php|/opt/plesk/php/[0-9]+\.[0-9]+/bin/php|/usr/(?:local/)?bin/php[0-9.]*|php[0-9.]*)\Z')
+
+
+def plesk_command(host):
+    """Run plesk-source.py with the Plesk server's own Python; the request goes to its stdin."""
+    code = base64.b64encode((HERE / 'plesk-source.py').read_bytes()).decode()
+    script = 'p=$(command -v python3 || echo /usr/libexec/platform-python); exec "$p" -I -c "$0"'
+    return remote(host, ['sh', '-c', script, 'import base64;exec(base64.b64decode("' + code + '"))'])
+
+
+def plesk_php_version(handler):
+    """alt-php74-fpm / plesk-php82-fastcgi → 7.4 / 8.2; None for other handlers."""
+    match = re.fullmatch(r'(?:alt|plesk)-php([0-9])([0-9]+)-[a-z-]+', str(handler or ''))
+    return '%s.%s' % match.groups() if match else None
+
+
+def cron_field_valid(minimum, maximum, value):
+    """ISPConfig's validate_cron run_time_format (the API rejects anything else)."""
+    if not re.fullmatch(r'[0-9,/*-]+', value) or re.search(r'[-,/][-,/]', value):
+        return False
+    for entry in value.split(','):
+        match = CRON_ENTRY.match(entry)
+        if not match:
+            return False
+        start, end, step = match.groups()
+        if start is not None and (not minimum <= int(start) <= maximum
+                                  or end is not None and (not minimum <= int(end) <= maximum or int(end) <= int(start))):
+            return False
+        if step is not None and not 2 <= int(step) <= maximum - 1:
+            return False
+    return True
+
+
+def cron_interval(fields):
+    """Shortest interval between runs in minutes, as ISPConfig computes it for limit_cron_frequency."""
+    interval = None
+    for (_, minimum, maximum, weight), value in zip(CRON_FIELDS, fields):
+        used = set()
+        for entry in value.split(','):
+            start, end, step = CRON_ENTRY.match(entry).groups()
+            low, high = (minimum, maximum) if start is None else (int(start), int(end or start))
+            used.update(range(low, high + 1, int(step or 1)))
+        used = sorted(used)
+        gap = min([b - a for a, b in zip(used, used[1:])] + [used[0] - minimum + maximum - used[-1] + 1])
+        if 0 < gap <= maximum:
+            interval = gap * weight if interval is None else min(interval, gap * weight)
+    return interval
+
+
+def parse_crontab(text):
+    """Jobs of a crontab with the SHELL in effect and Plesk's '#@desc:' description."""
+    shell, description, jobs = '/bin/sh', None, []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith('#'):
+            if line.startswith('#@desc:'):
+                description = line[len('#@desc:'):].strip()
+            continue
+        variable = re.fullmatch(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)', line)
+        if variable:
+            if variable.group(1) == 'SHELL':
+                shell = variable.group(2).strip().strip('"\'')
+            continue
+        if line.startswith('@'):
+            parts = re.split(r'\s+', line, maxsplit=1)
+            fields = CRON_MACROS.get(parts[0].lower(), '').split() or None
+            command = parts[1] if len(parts) == 2 else ''
+        else:
+            parts = re.split(r'\s+', line, maxsplit=5)
+            fields, command = (parts[:5], parts[5]) if len(parts) == 6 else (None, '')
+        jobs.append({'schedule': fields, 'command': command.strip(), 'shell': shell, 'description': description})
+        description = None
+    return jobs
+
+
+def shell_syntax(command):
+    """True when sh would treat part of the command as more than plain words (or crontab as stdin: %)."""
+    quote = None
+    for char in command:
+        if char == '%':
+            return True
+        if quote == "'":
+            quote = None if char == "'" else quote
+        elif quote == '"':
+            if char == '"':
+                quote = None
+            elif char in '$`\\':
+                return True
+        elif char in '\'"':
+            quote = char
+        elif char in ';&|<>()$`*?[]{}~\\#!':
+            return True
+    return quote is not None
+
+
+def webspace_path(value, *, home, chroot, entries):
+    """Webspace-relative path of a command word ('.' = webspace root), or None when it is no webspace path.
+
+    Plesk runs jobs in the webspace (relative paths) or, with the chroot shell, sees the webspace as /.
+    """
+    if value == home or value.startswith(home + '/'):
+        relative = value[len(home):].strip('/')
+    elif chroot and value.startswith('/') and value[1:].split('/', 1)[0] in entries:
+        relative = value[1:]
+    elif not value.startswith('/') and value.split('/', 1)[0] in entries:
+        relative = value
+    else:
+        return None
+    relative = os.path.normpath(relative) if relative else '.'
+    return None if relative == '..' or relative.startswith('../') else relative
+
+
+def plesk_cron_job(job, *, home, entries, folders):
+    """A source cron job as reusable command words, its URL, or the reason it needs manual review.
+
+    folders maps webspace-relative source folders to website folders ('httpdocs' → 'web'). The result
+    has 'owner': 'site' (refers to this website), 'any' (no webspace path) or 'other' (another domain).
+    """
+    result = {'schedule': job['schedule'], 'source': job['command'], 'description': job['description']}
+    if job['schedule'] is None:
+        return dict(result, owner='any', reason='schedule ISPConfig cannot store (@reboot or malformed)')
+    if not all(cron_field_valid(minimum, maximum, value) for (_, minimum, maximum, _), value in zip(CRON_FIELDS, job['schedule'])):
+        return dict(result, owner='any', reason='schedule ISPConfig cannot store (names, */1 or unusual steps)')
+    command, suffix = job['command'], ''
+    match = CRON_REDIRECT.search(command)
+    if match:
+        command, suffix = command[:match.start()], match.group(0).strip()
+    if not command.strip() or shell_syntax(command):
+        return dict(result, owner='any', reason='shell syntax (pipes, variables, globs, quotes or %)')
+    words = shlex.split(command)
+    if os.path.basename(words[0]) in ('curl', 'wget'):
+        urls = [word for word in words if re.match(r'https?://', word)]
+        if len(urls) == 1:
+            return dict(result, owner='url', url=urls[0])
+        return dict(result, owner='any', reason='URL fetch with several or no URLs')
+    chroot = job['shell'].endswith('chrootsh')
+    mapped, unmapped = [], []
+    for index, word in enumerate(words):
+        if index == 0 and CRON_PHP.match(word):
+            mapped.append({'php': word})
+            continue
+        option = re.match(r'(-{1,2}[A-Za-z][A-Za-z0-9_-]*=)(.+)\Z', word)
+        prefix, value = option.groups() if option else ('', word)
+        relative = webspace_path(value, home=home, chroot=chroot, entries=entries)
+        if relative is None:
+            mapped.append(word)
+            continue
+        target = next((folder + relative[len(source):] for source, folder in folders
+                       if relative == source or relative.startswith(source + '/')), None)
+        if target is None:
+            unmapped.append(relative)
+        mapped.append({'prefix': prefix, 'path': target} if target is not None else word)
+    paths = [word for word in mapped if isinstance(word, dict) and 'path' in word]
+    if unmapped and paths:
+        return dict(result, owner='site', reason='refers to files that are not migrated: ' + ', '.join(unmapped))
+    if unmapped:
+        return dict(result, owner='other')
+    return dict(result, owner='site' if paths else 'any', words=mapped, suffix=suffix)
+
+
+def render_cron(job, *, document_root, cron_type, php_cli):
+    """Command of an ISPConfig cron job: absolute paths for 'full', website-relative (/web/...) in the jail."""
+    if 'url' in job:
+        return job['url']
+    words = []
+    for word in job['words']:
+        if isinstance(word, str):
+            words.append(word)
+        elif 'php' in word:
+            words.append(php_cli)
+        else:
+            words.append(word['prefix'] + (document_root if cron_type == 'full' else '') + '/' + word['path'])
+    return shlex.join(words) + (' ' + job['suffix'] if job['suffix'] else '')
+
+
+def cron_decision(job, client):
+    """None when the client's plan accepts the job, otherwise why it is left for manual review."""
+    if 'reason' in job:
+        return job['reason']
+    limit = client.get('limit_cron_type') or 'url'
+    if 'url' not in job and limit == 'url':
+        return "the client's plan permits only URL cron jobs"
+    frequency = int(client.get('limit_cron_frequency') or 0)
+    interval = cron_interval(job['schedule'])
+    if frequency > 1 and interval is not None and interval < frequency:
+        return 'runs every %d minutes; the plan allows every %d minutes or less often' % (interval, frequency)
+    return None
+
+
+def plesk_rows(rows):
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row['t'], []).append(row)
+    return grouped
+
+
+def plesk_site(rows, domain):
+    """The Plesk domain to migrate, with website hosting in its webspace."""
+    found = [row for row in plesk_rows(rows).get('domain', []) if str(row['name']).lower() == domain]
+    require(len(found) == 1, 'The domain is not on the Plesk server: ' + domain)
+    site = found[0]
+    require(site['htype'] == 'vrt_hst' and site['www_root'] and site['home'] and site['login'],
+            'The Plesk domain has no website hosting (forwarding or DNS/mail only)')
+    require(not site['name'].startswith('_.'), 'This is the wildcard subdomain of a website; migrate its website')
+    require(site['status'] == 0, 'The Plesk domain is suspended or disabled (status %s); do not activate it implicitly' % site['status'])
+    home, root = site['home'].rstrip('/'), site['www_root'].rstrip('/')
+    require(home.startswith('/') and os.path.normpath(home) == home and root.startswith(home + '/') and os.path.normpath(root) == root,
+            'The document root is outside the webspace')
+    relative = root[len(home) + 1:]
+    require(FOLDER_PART.fullmatch(relative),
+            'The document root %s is a subfolder of the webspace folder; such layouts are not supported yet' % root)
+    return site
+
+
+def plesk_inventory(rows, account, domain, databases=None):
+    """Plesk metadata in the migration's inventory format: the website, its databases, aliases, subdomains and cron.
+
+    databases names exactly which databases of the subscription to migrate; by default, those Plesk assigns to the domain.
+    """
+    site = plesk_site(rows, domain)
+    grouped = plesk_rows(rows)
+    domains = grouped.get('domain', [])
+    home, root = site['home'].rstrip('/'), site['www_root'].rstrip('/')
+    subscription_id = site['webspace_id'] or site['id']
+    notes, children, wildcard = [], [], False
+    for child in sorted((row for row in domains if row['parent_id'] == site['id']), key=lambda row: row['name']):
+        name = str(child['name']).lower()
+        if child['htype'] != 'vrt_hst' or not child['www_root']:
+            notes.append('Subdomain %s has no website hosting (forwarding); configure it by hand' % name)
+            continue
+        child_root = child['www_root'].rstrip('/')
+        if child['status'] != 0:
+            notes.append('Subdomain %s is disabled in Plesk and is not migrated' % name)
+        elif name == '_.' + domain and child_root == root:
+            wildcard = True
+        elif name.startswith('_.'):
+            notes.append('The wildcard subdomain *.%s has its own folder; configure it by hand' % domain)
+        elif not name.endswith('.' + domain):
+            notes.append('Subdomain %s does not end with %s; migrate it separately' % (name, domain))
+        elif child_root == root:
+            children.append({'domain_id': 's%d' % child['id'], 'domain': name, 'type': 'subdomain', 'subdomain': 'none',
+                             'redirect_type': '', 'redirect_path': '', 'active': 'y'})
+        elif child_root.startswith(root + '/') and all(FOLDER_PART.fullmatch(part) for part in child_root[len(root) + 1:].split('/')):
+            children.append({'domain_id': 's%d' % child['id'], 'domain': name, 'type': 'vhostsubdomain', 'subdomain': 'www',
+                             'web_folder': 'web/' + child_root[len(root) + 1:], 'php_version': plesk_php_version(child['php_handler']),
+                             'redirect_type': '', 'redirect_path': '', 'active': 'y'})
+        else:
+            notes.append('Subdomain %s has its own folder outside the document root; migrate it separately '
+                         '(ispcp-migrate --from plesk %s CLIENT_ID)' % (name, name))
+    for alias in sorted((row for row in grouped.get('alias', []) if row['dom_id'] == site['id']), key=lambda row: row['name']):
+        name = str(alias['name']).lower()
+        if alias['web'] != 'true':
+            notes.append('Alias %s is not used for the website (mail/DNS only) and is not migrated' % name)
+            continue
+        redirect = alias['seo_redirect'] == 'true'
+        children.append({'domain_id': 'a%d' % alias['id'], 'domain': name, 'type': 'alias', 'subdomain': 'www',
+                         'redirect_type': 'R=301,L' if redirect else '', 'redirect_path': '[scheme]://%s/' % domain if redirect else '',
+                         'active': 'y' if alias['status'] == 0 else 'n'})
+    by_id = {row['id']: row for row in domains}
+
+    def with_parent(row):
+        """A subdomain that is migrated together with its parent website (same folder or inside its document root)."""
+        parent = by_id.get(row['parent_id'])
+        if not parent or parent['htype'] != 'vrt_hst' or not parent['www_root'] or not row['www_root']:
+            return False
+        parent_root, child_root = parent['www_root'].rstrip('/'), row['www_root'].rstrip('/')
+        return child_root == parent_root or child_root.startswith(parent_root + '/')
+
+    others = sorted(str(row['name']).lower() for row in domains if row['id'] != site['id'] and row['htype'] == 'vrt_hst'
+                    and (row['webspace_id'] or row['id']) == subscription_id and not str(row['name']).startswith('_.')
+                    and row['parent_id'] != site['id'] and not with_parent(row))
+    if others:
+        notes.append('Other websites of this Plesk subscription, migrated separately: ' + ', '.join(others))
+    servers = {row['id']: row for row in grouped.get('dbserver', [])}
+    charsets = {row['name']: row['charset'] for row in grouped.get('charset', [])}
+    users = grouped.get('dbuser', [])
+    subscription = {row['id'] for row in domains if (row['webspace_id'] or row['id']) == subscription_id}
+    if databases is None:
+        selected = [row for row in grouped.get('database', []) if row['dom_id'] == site['id']]
+    else:
+        available = {row['name']: row for row in grouped.get('database', []) if row['dom_id'] in subscription}
+        missing = sorted(set(databases) - set(available))
+        require(not missing, 'Not a database of this Plesk subscription: %s (available: %s)' % (
+            ', '.join(missing), ', '.join(sorted(available)) or 'none'))
+        selected = [available[name] for name in sorted(set(databases))]
+    assigned = sorted(row['name'] for row in grouped.get('database', []) if row['dom_id'] in subscription
+                      and row['dom_id'] != site['id'] and row not in selected)
+    if assigned:
+        notes.append('Databases of other websites of the subscription, not migrated (select with --database): ' + ', '.join(assigned))
+    databases = []
+    for db in sorted(selected, key=lambda row: row['name']):
+        server = servers.get(db['server_id'], {})
+        require(db['type'] == 'mysql' and server.get('type') == 'mysql' and server.get('host') in ('localhost', '127.0.0.1'),
+                'Database %s is not on the local MySQL server of Plesk; only local MySQL/MariaDB databases are supported' % db['name'])
+        require(re.fullmatch(r'[A-Za-z0-9_-]{1,64}', db['name']), 'Unsupported Plesk database name: ' + str(db['name']))
+        own = [user for user in users if user['db_id'] == db['id']]
+        shared = [user for user in users if user['db_id'] == 0 and user['dom_id'] == subscription_id]
+        default = [user['login'] for user in own + shared if user['id'] == db['default_user_id']]
+        logins = sorted({user['login'] for user in own + shared})
+        if not logins:
+            notes.append('Database %s has no Plesk user; applications must use the new database user' % db['name'])
+        databases.append({'database_id': db['id'], 'server_id': db['server_id'], 'database_name': db['name'],
+                          'database_charset': charsets.get(db['name']) or '', 'type': 'mysql', 'active': 'y',
+                          'database_user': (default or [user['login'] for user in own] or logins or [''])[0], 'database_users': logins})
+    folder = root[len(home) + 1:]
+    other_folders = {str(row['www_root']).rstrip('/')[len(home) + 1:].split('/', 1)[0] for row in domains
+                     if row['id'] != site['id'] and str(row['www_root'] or '').startswith(home + '/')}
+    entries = sorted(set(account['entries']))
+    cron, seen = [], set()
+    skipped_cron = 0
+    for job in parse_crontab(account['crontab']):
+        result = plesk_cron_job(job, home=home, entries=entries, folders=[(folder, 'web')])
+        owner = result.pop('owner')
+        if owner == 'url':
+            host = urllib.parse.urlsplit(result['url']).hostname or ''
+            names = {domain} | {child['domain'] for child in children}
+            owner = 'site' if host.lower() in names | {'www.' + name for name in names} else 'any'
+        # Jobs of the whole subscription (no paths) belong to its main website.
+        if not (owner == 'site' or owner == 'any' and not site['webspace_id'] and not site['parent_id']):
+            skipped_cron += 1
+            continue
+        # The same job twice (often with two PHP versions) would run twice on the new website.
+        key = json.dumps([result['schedule'], result.get('url'), result.get('suffix'), result.get('reason') and result['source'],
+                          [word if isinstance(word, str) or 'path' in word else 'php' for word in result.get('words', [])]])
+        if key in seen:
+            notes.append('Duplicate cron job skipped: ' + result['source'])
+            continue
+        seen.add(key)
+        cron.append(result)
+    if skipped_cron:
+        notes.append('%d cron job(s) of other websites of the subscription are left to their own migration' % skipped_cron)
+    return {
+        'source': 'plesk',
+        'site': {'domain_id': site['id'], 'server_id': 'plesk', 'domain': domain, 'type': 'vhost', 'document_root': home,
+                 'www_root': root, 'system_user': site['login'], 'system_group': account['group'], 'uid': account['uid'],
+                 'gid': account['gid'], 'php': 'php-fpm', 'php_handler': site['php_handler'],
+                 'php_version': plesk_php_version(site['php_handler']), 'server_php_id': 0,
+                 'subdomain': '*' if wildcard else 'www', 'active': 'y',
+                 'subscription': next(str(row['name']) for row in domains if row['id'] == subscription_id)},
+        'databases': databases, 'children': children, 'cron': cron, 'notes': notes,
+        'not_copied': [entry for entry in entries if entry != folder and entry not in PLESK_SYSTEM_ENTRIES and entry not in other_folders],
+        'servers': [],
+    }
+
+
+def plesk_sites_inventory(rows, host):
+    """`plesk db` rows in the --sites inventory format of the old ISPConfig panel."""
+    grouped = plesk_rows(rows)
+    domains = {row['id']: row for row in grouped.get('domain', [])}
+    websites = []
+    for row in sorted(domains.values(), key=lambda row: row['id']):
+        if row['htype'] == 'none' or str(row['name']).startswith('_.'):
+            continue
+        parent = domains.get(row['parent_id'])
+        shared = parent is not None and parent['htype'] == 'vrt_hst' and row['www_root'] and row['www_root'] == parent['www_root']
+        kind = 'subdomain' if shared else 'vhostsubdomain' if row['parent_id'] else 'vhostalias' if row['webspace_id'] else 'vhost'
+        websites.append({
+            'domain_id': row['id'], 'server_id': 1, 'domain': str(row['name']).lower(), 'type': kind,
+            'parent_domain_id': row['parent_id'] or row['webspace_id'] or 0, 'subdomain': 'www',
+            'active': 'y' if row['status'] == 0 else 'n', 'document_root': row['www_root'] or '',
+            'redirect_path': None if row['htype'] == 'vrt_hst' else 'forwarding',
+            'client_username': row['client'], 'client_company': row['company'], 'client_contact': row['contact']})
+    for alias in grouped.get('alias', []):
+        if alias['web'] == 'true' and alias['dom_id'] in domains:
+            websites.append({'domain_id': 'a%d' % alias['id'], 'server_id': 1, 'domain': str(alias['name']).lower(), 'type': 'alias',
+                             'parent_domain_id': alias['dom_id'], 'subdomain': 'www', 'active': 'y' if alias['status'] == 0 else 'n',
+                             'document_root': ''})
+    databases = {}
+    for db in grouped.get('database', []):
+        databases[str(db['dom_id'])] = databases.get(str(db['dom_id']), 0) + 1
+    traffic = {str(domains[row['dom_id']]['name']).lower(): int(row['bytes'] or 0)
+               for row in grouped.get('traffic', []) if row['dom_id'] in domains}
+    return {'websites': websites, 'databases': databases, 'servers': [{'server_id': 1, 'server_name': host}],
+            'ips': [{'server_id': 1, 'ip_address': row['address']} for row in grouped.get('ip', [])], 'traffic': traffic}
+
+
+def select_source(config, name):
+    """The configuration of one migration: "source" or the named entry of "sources" (never part of the state fingerprint)."""
+    selected = {key: value for key, value in config.items() if key != 'sources'}
+    if name:
+        sources = config.get('sources')
+        require(isinstance(sources, dict) and isinstance(sources.get(name), dict),
+                'The configuration has no source "%s" under "sources"' % name)
+        selected['source'] = sources[name]
+    return selected
+
+
+# Configuration files that commonly hold absolute paths; PHP files only directly in the document root.
+PATH_FILES = frozenset(('.htaccess', '.user.ini', 'php.ini', '.env', 'wp-config.php', 'wordfence-waf.php'))
+
+
+def old_path_references(tree, old_root, limit=200):
+    """Staged configuration files that still name the old webspace (reported, never changed)."""
+    needle = (old_root.rstrip('/') + '/').encode()
+    found = []
+    for directory, dirs, files in os.walk(tree, followlinks=False):
+        dirs.sort()
+        for name in sorted(files):
+            path = Path(directory) / name
+            top = path.parent == Path(tree) / 'web'
+            if name not in PATH_FILES and not (top and name.endswith(('.php', '.ini'))):
+                continue
+            with contextlib.suppress(OSError):
+                if path.is_file() and not path.is_symlink() and path.stat().st_size <= MB and needle in path.read_bytes():
+                    found.append(str(path.relative_to(tree)))
+            if len(found) >= limit:
+                return found
+    return found
+
+
 class Migration:
+    kind = 'ispconfig'
+
     def __init__(self, config, state_dir, domain, client_id):
         self.config = config
         self.source = config['source']
@@ -404,26 +842,34 @@ class Migration:
         require(transport in ('local', 'ssh'), 'target.web_transport must be local or ssh')
         self.local_web = transport == 'local'
         self.php_version = None  # --php VERSION of this migration
+        self.databases = None  # --database NAME (Plesk): exactly these databases of the subscription
         self.directory = private_directory(state_dir)
         self.file = self.directory / 'state.json'
         self.domain = domain_name(domain)
         self.client_id = int(client_id)
         require(self.client_id > 0, 'client-id is the new ISPConfig client ID, not the WHMCS customer ID')
-        via_web = self.source.get('db_via_web')
-        require(('db_via_web' in self.source) != ('db_ssh' in self.source),
-                'Configure exactly one of source.db_via_web or source.db_ssh')
-        if 'db_via_web' in self.source:
-            require(isinstance(via_web, dict), 'source.db_via_web must be an object')
-            require(isinstance(via_web.get('host'), str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9.-]*', via_web['host']),
-                    'source.db_via_web.host must be a MySQL hostname or IPv4 address')
-            require(isinstance(via_web.get('port', 3306), int) and 1 <= via_web.get('port', 3306) <= 65535,
-                    'Invalid source MySQL port')
-            require(set(via_web) <= {'host', 'port', 'defaults_file'}, 'Unknown source.db_via_web option')
-            if 'defaults_file' in via_web:
-                value = via_web['defaults_file']
-                require(isinstance(value, str) and value.startswith('/') and not any(c in value for c in '\x00\r\n'),
-                        'source.db_via_web.defaults_file must be an absolute path on the old web server')
-        for host in [self.source['panel_ssh'], self.source['web_ssh'], self.target['web_ssh'], self.target['db_ssh']] + list(self.source.get('db_ssh', {}).values()):
+        self.kind = self.source.get('type', 'ispconfig')
+        require(self.kind in SOURCE_TYPES, 'source.type must be ispconfig or plesk')
+        if self.kind == 'plesk':
+            require(set(self.source) == {'type', 'ssh'}, 'A Plesk source has exactly "type": "plesk" and "ssh": "root@PLESK-HOST"')
+            hosts = [self.source['ssh']]
+        else:
+            via_web = self.source.get('db_via_web')
+            require(('db_via_web' in self.source) != ('db_ssh' in self.source),
+                    'Configure exactly one of source.db_via_web or source.db_ssh')
+            if 'db_via_web' in self.source:
+                require(isinstance(via_web, dict), 'source.db_via_web must be an object')
+                require(isinstance(via_web.get('host'), str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9.-]*', via_web['host']),
+                        'source.db_via_web.host must be a MySQL hostname or IPv4 address')
+                require(isinstance(via_web.get('port', 3306), int) and 1 <= via_web.get('port', 3306) <= 65535,
+                        'Invalid source MySQL port')
+                require(set(via_web) <= {'host', 'port', 'defaults_file'}, 'Unknown source.db_via_web option')
+                if 'defaults_file' in via_web:
+                    value = via_web['defaults_file']
+                    require(isinstance(value, str) and value.startswith('/') and not any(c in value for c in '\x00\r\n'),
+                            'source.db_via_web.defaults_file must be an absolute path on the old web server')
+            hosts = [self.source['panel_ssh'], self.source['web_ssh']] + list(self.source.get('db_ssh', {}).values())
+        for host in hosts + [self.target['web_ssh'], self.target['db_ssh']]:
             ssh_host(host)
         for field in ('web_server_id', 'db_server_id'):
             require(isinstance(self.target[field], int) and self.target[field] > 0, 'Invalid target ' + field)
@@ -442,6 +888,49 @@ class Migration:
 
     def save(self):
         atomic_json(self.file, self.state)
+
+    def plesk(self, request, *, output=None, log='plesk-source.log'):
+        """One read-only plesk-source.py action over root SSH; its messages stay in the private log."""
+        return execute(plesk_command(self.source['ssh']), data=(json.dumps(request) + '\n').encode(),
+                       output=output, error_path=self.directory / log)
+
+    def source_inventory(self):
+        require(self.databases is None or self.kind == 'plesk', '--database selects databases of a Plesk subscription (--from plesk)')
+        if self.kind == 'plesk':
+            self.state['plesk'] = json.loads(self.plesk({'action': 'check'}))
+            rows = json.loads(self.plesk({'action': 'inventory'}))['rows']
+            site = plesk_site(rows, self.domain)
+            account = json.loads(self.plesk({'action': 'account', 'login': site['login'], 'home': site['home'].rstrip('/')}))
+            return plesk_inventory(rows, account, self.domain, self.databases)
+        inventory = json.loads(execute(php_remote(self.source['panel_ssh'], 'source-inventory.php'),
+                                       data=(json.dumps({'domain': self.domain}) + '\n').encode(),
+                                       error_path=self.directory / 'source-inventory.log'))
+        atomic_json(self.directory / 'inventory.json', inventory)
+        validate_inventory(inventory, self.domain)
+        return inventory
+
+    def link_roots(self):
+        """Old absolute paths and the staged folder that holds them, for normalize_links."""
+        site = self.state['inventory']['site']
+        return [(site['www_root'], 'web')] if self.kind == 'plesk' else [(site['document_root'], '')]
+
+    def php_cli(self, php):
+        """PHP CLI of the new website's PHP version for its cron jobs (server default: php)."""
+        if not php['server_php_id']:
+            return '/usr/bin/php'
+        rows = self.admin.all('/servers/%d/php-versions' % self.target['web_server_id'])
+        found = [row.get('php_cli_binary') for row in rows if int(row.get('id') or 0) == php['server_php_id']]
+        return found[0] if found and found[0] else '/usr/bin/php'
+
+    def cron_plan(self, inventory, client, php):
+        """Source cron jobs the client's plan accepts, created inactive; the others are listed for review."""
+        cli = self.php_cli(php) if inventory.get('cron') else '/usr/bin/php'
+        cron_type = 'full' if client.get('limit_cron_type') == 'full' else 'chrooted'
+        plan = []
+        for job in inventory.get('cron', []):
+            reason = cron_decision(job, client)
+            plan.append(dict(job, create=reason is None, reason=reason, type='url' if 'url' in job else cron_type, php_cli=cli))
+        return plan
 
     def web_command(self, argv):
         return argv if self.local_web else remote(self.target['web_ssh'], argv)
@@ -476,13 +965,17 @@ class Migration:
         inventory = self.state['inventory']
         children = [child for child in inventory['children'] if 'child:' + str(child['domain_id']) not in objects]
         databases = [db['database_name'] for db in inventory['databases']]
-        return {
+        counts = {
             'web_domains': 0 if 'site' in objects else 1,
             'web_alias_domains': sum(child['type'] == 'alias' for child in children),
-            'web_subdomains': sum(child['type'] == 'subdomain' for child in children),
+            'web_subdomains': sum(child['type'] in ('subdomain', 'vhostsubdomain') for child in children),
             'database_users': sum('user:' + name not in objects for name in databases),
             'databases': sum('db:' + name not in objects for name in databases),
         }
+        if self.state.get('cron_jobs'):
+            counts['cron_jobs'] = sum(job['create'] and 'cron:%d' % index not in objects
+                                      for index, job in enumerate(self.state['cron_jobs']))
+        return counts
 
     def allocation(self, summary):
         """Quotas of the migrated objects, checked against the measured source sizes.
@@ -527,6 +1020,11 @@ class Migration:
         product limit never stops the migration between created objects."""
         summary = self.usage_summary()
         check_counts(summary, self.needed_counts())
+        if self.state['inventory']['site'].get('subdomain') == '*' and 'site' not in self.state['objects']:
+            client = self.admin.get('/clients/' + str(self.client_id))
+            require(client.get('limit_wildcard') in (True, 'y'),
+                    'The old website also serves *.%s (wildcard subdomain), which the client\'s plan does not allow. '
+                    'Enable wildcard subdomains for the client (limit_wildcard), then repeat the command.' % self.domain)
         self.state['quotas'] = self.allocation(summary)
         self.state['website_disk_quota_mb'] = self.state['quotas']['disk_mb']
         self.save()
@@ -554,6 +1052,14 @@ class Migration:
 
     def measure_source(self, inventory):
         """Read-only size check, so quota problems stop before any write."""
+        if self.kind == 'plesk':
+            site = inventory['site']
+            names = [db['database_name'] for db in inventory['databases']]
+            result = json.loads(self.plesk({'action': 'size', 'login': site['system_user'], 'paths': [site['www_root']],
+                                            'databases': names}, log='source-size.log'))
+            require(set(result['databases']) == set(names), 'Could not measure the source databases')
+            return {'web_bytes': int(result['paths'][site['www_root']]),
+                    'databases': {name: int(result['databases'][name]) for name in names}}
         root = inventory['site']['document_root']
         output = execute(remote(self.source['web_ssh'], ['du', '-sk', '--', root + '/web', root + '/private']),
                          error_path=self.directory / 'source-size.log').decode()
@@ -589,16 +1095,16 @@ class Migration:
 
     def plan(self):
         self.api = self.admin
-        inventory = json.loads(execute(php_remote(self.source['panel_ssh'], 'source-inventory.php'),
-                                      data=(json.dumps({'domain': self.domain}) + '\n').encode(),
-                                      error_path=self.directory / 'source-inventory.log'))
-        atomic_json(self.directory / 'inventory.json', inventory)
-        validate_inventory(inventory, self.domain)
-        routes = [self.source_database_route(db, inventory) for db in inventory['databases']]
+        inventory = self.source_inventory()
+        if self.kind == 'plesk':
+            atomic_json(self.directory / 'inventory.json', inventory)
+            checks = [(self.target['db_ssh'], self.target['db_server_id'])]
+        else:
+            routes = [self.source_database_route(db, inventory) for db in inventory['databases']]
+            checks = [(self.source['web_ssh'], inventory['site']['server_id']), (self.target['db_ssh'], self.target['db_server_id'])] + [
+                (host, request['server_id']) for host, request in routes]
         self.check_web_server()
-        for host, server_id in [(self.source['web_ssh'], inventory['site']['server_id']),
-                                (self.target['db_ssh'], self.target['db_server_id'])] + [
-                                    (host, request['server_id']) for host, request in routes]:
+        for host, server_id in checks:
             execute(php_remote(host, 'server-check.php'), data=(json.dumps({'server_id': server_id}) + '\n').encode(),
                     error_path=self.directory / 'server-check.log')
         client = self.api.get('/clients/' + str(self.client_id))
@@ -612,13 +1118,23 @@ class Migration:
         require(not existing or (len(existing) == 1 and existing[0]['id'] == own),
                 'Target domain already exists outside this migration; refusing to adopt/overwrite it')
         if 'inventory' in self.state:
-            require(inventory == self.state['inventory'], 'Source inventory changed; review it before continuing this migration')
+            previous = self.state['inventory']
+            # Plesk changes crontabs and notes by itself (WP Toolkit); only what identifies created objects must stay.
+            fixed = ('source', 'site', 'databases', 'children') if self.kind == 'plesk' else tuple(set(previous) | set(inventory))
+            require({key: inventory.get(key) for key in fixed} == {key: previous.get(key) for key in fixed},
+                    'Source inventory changed; review it before continuing this migration')
+            if self.kind == 'plesk' and inventory['cron'] != previous['cron'] \
+                    and any(name.startswith('cron:') for name in self.state['objects']):
+                print('WARNING: the Plesk cron jobs changed after they were created on the new website; '
+                      'the created jobs are kept, compare them with Plesk.')
+                inventory = dict(inventory, cron=previous['cron'])
         for name, entry in self.state['objects'].items():
             require('record' in entry, 'Uncertain previous POST for %s. Reconcile the API receipt in state.json before retrying; never delete state blindly.' % name)
         self.state['inventory'] = inventory
         self.state['client_label'] = client.get('username', '')
         self.state['source_size'] = self.measure_source(inventory)
         php = self.select_php()
+        self.state['cron_jobs'] = self.cron_plan(inventory, client, php) if self.kind == 'plesk' else []
         self.preflight()
         staging, free = self.check_free_space()
         quotas, sizes = self.state['quotas'], self.state['source_size']
@@ -627,9 +1143,18 @@ class Migration:
             return 'unlimited' if value == -1 else '%d MB' % value
 
         print('PLAN: %s → ISPConfig client %s (%s)' % (self.domain, self.client_id, self.state['client_label']))
-        print('Web: %s:%s → %s' % (self.source['web_ssh'], inventory['site']['document_root'], self.target['web_ssh']))
+        site = inventory['site']
+        if self.kind == 'plesk':
+            print('Source: Plesk %s on %s, subscription %s, read as its system user %s' % (
+                self.state['plesk']['version'].split()[0], self.source['ssh'], site['subscription'], site['system_user']))
+            print('Web: %s → web/ on %s' % (site['www_root'], self.target['web_ssh']))
+        else:
+            print('Web: %s:%s → %s' % (self.source['web_ssh'], site['document_root'], self.target['web_ssh']))
         print('PHP: ' + ('%s (configuration ID %d)' % (php['version'], php['server_php_id']) if php['version'] else
                          'configuration ID %d' % php['server_php_id'] if php['server_php_id'] else 'server default'))
+        if self.kind == 'plesk':
+            hint = '' if php['version'] == site['php_version'] or not site['php_version'] else '; keep it with --php ' + site['php_version']
+            print('Source PHP: %s (%s)%s' % (site['php_version'] or 'unknown', site['php_handler'], hint))
         print('Destination web access: ' + ('local (no SSH)' if self.local_web else 'SSH'))
         print('Website disk quota: %s (source files %d MB)' % (mb(quotas['disk_mb']), -(-sizes['web_bytes'] // MB)))
         print('Website traffic quota: ' + mb(quotas['traffic_mb']))
@@ -640,10 +1165,41 @@ class Migration:
         if 'db_via_web' in self.source:
             connection = self.source['db_via_web']
             print('Source MySQL: %s:%s via %s' % (connection['host'], connection.get('port', 3306), self.source['web_ssh']))
-        if inventory['children']:
-            print('Shared-root aliases/subdomains: ' + ', '.join(child['domain'] for child in inventory['children']))
-        print('WHMCS product/Create, mail, DNS, certificates and cron jobs remain operator steps.')
+        if self.kind == 'plesk':
+            self.print_plesk_plan(inventory)
+        else:
+            if inventory['children']:
+                print('Shared-root aliases/subdomains: ' + ', '.join(child['domain'] for child in inventory['children']))
+            print('WHMCS product/Create, mail, DNS, certificates and cron jobs remain operator steps.')
         print('Plan only: no writes to source or target servers. State: ' + str(self.directory))
+
+    def print_plesk_plan(self, inventory):
+        site = inventory['site']
+        if site['subdomain'] == '*':
+            print('Wildcard: *.%s is served by the website (ISPConfig subdomain *)' % self.domain)
+        aliases = [child for child in inventory['children'] if child['type'] == 'alias']
+        if aliases:
+            print('Aliases: ' + ', '.join(child['domain'] + (' (301 to %s)' % self.domain if child['redirect_type'] else '')
+                                          + ('' if child['active'] == 'y' else ' (inactive)') for child in aliases))
+        subdomains = [child for child in inventory['children'] if child['type'] != 'alias']
+        if subdomains:
+            print('Subdomains: ' + ', '.join(child['domain'] + (' (%s)' % child['web_folder'] if child['type'] == 'vhostsubdomain'
+                                                                else ' (same folder)') for child in subdomains))
+        jobs = self.state['cron_jobs']
+        if jobs:
+            print('Cron jobs (%d created INACTIVE: enable them after the DNS switch):' % sum(job['create'] for job in jobs))
+            for job in jobs:
+                schedule = ' '.join(job['schedule'] or ['?'])
+                if job['create']:
+                    command = render_cron(job, document_root='<website root>', cron_type=job['type'], php_cli=job['php_cli'])
+                    print('  %s  %s' % (schedule, command))
+                else:
+                    print('  MANUAL %s  %s (%s)' % (schedule, job['source'], job['reason']))
+        if inventory['not_copied']:
+            print('Not copied from the Plesk webspace (outside the document root): ' + ', '.join(inventory['not_copied']))
+        for note in inventory['notes']:
+            print('Note: ' + note)
+        print('WHMCS product/Create, mail, DNS and certificates remain operator steps; PHP settings of the Plesk domain are not copied.')
 
     def create(self, name, endpoint, payload):
         objects = self.state['objects']
@@ -709,6 +1265,16 @@ class Migration:
         self.check_target()
         for child in self.state['inventory']['children']:
             name = child['domain']
+            if child['type'] == 'vhostsubdomain':
+                payload = {'domain': name, 'type': 'vhostsubdomain', 'parent_domain_id': site['id'], 'web_folder': child['web_folder'],
+                           'php': 'php-fpm', 'active': True, 'subdomain': child['subdomain'], 'ssl': False,
+                           'ssl_letsencrypt': False, 'rewrite_to_https': False}
+                if php_id:
+                    payload['server_php_id'] = php_id
+                record = self.create('child:' + str(child['domain_id']), '/sites/web-domains', payload)
+                require(record['parent_domain_id'] == site['id'] and record['domain'] == name and record['web_folder'] == child['web_folder']
+                        and record['document_root'] == site['document_root'], 'Target subdomain identity changed')
+                continue
             if child['type'] == 'subdomain':
                 require(name.endswith('.' + self.domain), 'Source subdomain does not match parent')
                 name = name[:-len(self.domain) - 1]
@@ -749,8 +1315,21 @@ class Migration:
             target_db.update({'id': database['id'], 'name': database['database_name_full'],
                               'user': user['database_user_prefix'] + user['database_user'],
                               'host': self.target['db_host'], 'old_user': source_db['database_user']})
+            if 'database_users' in source_db:
+                target_db['old_users'] = source_db['database_users']
             self.save()
             self.db_io({'action': 'probe', **self.credentials(target_db)})
+        for index, job in enumerate(self.state.get('cron_jobs', [])):
+            if not job['create']:
+                continue
+            command = render_cron(job, document_root=site['document_root'], cron_type=job['type'], php_cli=job['php_cli'])
+            run_min, run_hour, run_mday, run_month, run_wday = job['schedule']
+            # Inactive: the old server keeps running the same jobs until the DNS switch.
+            record = self.create('cron:%d' % index, '/sites/cron-jobs', {
+                'parent_domain_id': site['id'], 'run_min': run_min, 'run_hour': run_hour, 'run_mday': run_mday,
+                'run_month': run_month, 'run_wday': run_wday, 'command': command, 'active': False,
+            })
+            require(record['parent_domain_id'] == site['id'] and record['command'] == command, 'Target cron job changed')
         atomic_json(self.directory / 'database-map.json', self.state['databases'])
 
     def files_command(self):
@@ -801,13 +1380,23 @@ class Migration:
         if (tree.parent / 'files-staged.json').exists():
             return tree
         tree.mkdir(parents=True, exist_ok=True, mode=0o700)
-        root = self.state['inventory']['site']['document_root']
-        for folder in ('web', 'private'):
-            destination = tree / folder
-            destination.mkdir(exist_ok=True)
-            execute(RSYNC + ['--delete-delay', self.source['web_ssh'] + ':' + root + '/' + folder + '/', str(destination) + '/'],
+        site = self.state['inventory']['site']
+        if self.kind == 'plesk':
+            (tree / 'private').mkdir(exist_ok=True)
+            (tree / 'web').mkdir(exist_ok=True)
+            # Read as the subscription's system user: a customer symlink cannot make root read other files.
+            reader = ['setpriv', '--reuid=%d' % site['uid'], '--regid=%d' % site['gid'], '--clear-groups', '--no-new-privs', '--', 'rsync']
+            execute(RSYNC + ['--delete-delay', '--rsync-path=' + shlex.join(reader),
+                             self.source['ssh'] + ':' + site['www_root'] + '/', str(tree / 'web') + '/'],
                     error_path=self.directory / 'rsync.log')
-        normalize_links(tree, root)
+        else:
+            root = site['document_root']
+            for folder in ('web', 'private'):
+                destination = tree / folder
+                destination.mkdir(exist_ok=True)
+                execute(RSYNC + ['--delete-delay', self.source['web_ssh'] + ':' + root + '/' + folder + '/', str(destination) + '/'],
+                        error_path=self.directory / 'rsync.log')
+        normalize_links(tree, self.link_roots())
         atomic_json(tree.parent / 'files-staged.json', {'complete': True})
         return tree
 
@@ -839,9 +1428,12 @@ class Migration:
             key = source['database_name']
             if (round_dir / (key + '.dumped.json')).exists():
                 continue
-            host, connection = self.source_database_route(source)
             with open(round_dir / (key + '.source.sql'), 'wb') as output:
-                self.db_io({'action': 'dump', 'source': True, 'database': key, **connection}, output=output, host=host)
+                if self.kind == 'plesk':
+                    self.plesk({'action': 'dump', 'database': key}, output=output, log='database.log')
+                else:
+                    host, connection = self.source_database_route(source)
+                    self.db_io({'action': 'dump', 'source': True, 'database': key, **connection}, output=output, host=host)
             atomic_json(round_dir / (key + '.dumped.json'), {'complete': True})
         for source in self.state['inventory']['databases']:
             key = source['database_name']
@@ -891,6 +1483,10 @@ class Migration:
             updated.append(str(path.relative_to(tree)))
         missing = sorted(set(self.state['databases']) - covered)
         report = {'wordpress_updated': updated, 'manual_files': manual, 'databases_needing_manual_config': missing}
+        if self.kind == 'plesk':
+            # e.g. Wordfence's .user.ini auto_prepend_file: PHP stops on the new server until the path is changed.
+            report['old_path_references'] = old_path_references(tree, self.state['inventory']['site']['document_root'])
+            manual = manual + report['old_path_references']
         atomic_json(tree.parent / 'configuration-report.json', report)
         self.state['manual_configuration'] = bool(manual or missing)
         self.save()
@@ -905,7 +1501,7 @@ class Migration:
             require(current[field] == self.site[field], 'Website identity changed since preparation')
         self.check_target()
         tree = self.directory / ('round-%03d' % self.state['round']) / 'tree'
-        normalize_links(tree, self.state['inventory']['site']['document_root'])
+        normalize_links(tree, self.link_roots())
         # Credential configurations MUST have been patched in the private staging tree first.
         transfer, target = self.target_rsync()
         for folder in ('private', 'web'):
@@ -917,6 +1513,9 @@ class Migration:
         self.save()
         print('COPY COMPLETE: ' + self.domain + ' (website ID ' + str(self.site['id']) + ')')
         print('Verify the application on the new host before switching DNS. Migration state: ' + str(self.directory))
+        created = sum(job['create'] for job in self.state.get('cron_jobs', []))
+        if created:
+            print('%d cron job(s) were created INACTIVE; enable them after the DNS switch and stop them on the old server.' % created)
 
     def run(self, *, sync=False, source_quiesced=False, target_quiesced=False, plan_ready=False):
         try:
@@ -1138,8 +1737,17 @@ def resolver_address(value):
 
 
 def source_sites(config):
-    """Every website of the old ISPConfig, read on the old panel (no state, no writes)."""
-    host = ssh_host(config['source']['panel_ssh'])
+    """Every website of the old ISPConfig (or Plesk) server, read on the old panel (no state, no writes)."""
+    source = config['source']
+    if source.get('type') == 'plesk':
+        host = ssh_host(source['ssh'])
+        result = subprocess.run(plesk_command(host), input=b'{"action": "inventory", "traffic": true}\n', capture_output=True)
+        if result.returncode:
+            lines = result.stderr.decode('utf-8', 'replace').strip().splitlines()
+            raise MigrationError('Reading the Plesk websites on %s failed (exit %d)%s' % (
+                host, result.returncode, ': ' + lines[-1][:300] if lines else ''))
+        return plesk_sites_inventory(json.loads(result.stdout)['rows'], host.split('@')[-1])
+    host = ssh_host(source['panel_ssh'])
     result = subprocess.run(php_remote(host, 'source-sites.php'), stdin=subprocess.DEVNULL, capture_output=True)
     if result.returncode:
         # Only the helper's own messages and SSH errors; no credentials reach stderr.
@@ -1302,7 +1910,7 @@ def print_sites(report, states=SITE_STATES, *, as_json=False, out=None):
     out.write('\n' + '\n'.join('%-5s %4d  %s' % (state, counts[state], SITE_STATE_HELP[state]) for state in SITE_STATES) + '\n')
     inactive = sum(not site['active'] for site in report['websites'])
     if inactive:
-        out.write('Inactive old websites (ACT n): %d; ISPConfig does not serve them.\n' % inactive)
+        out.write('Inactive old websites (ACT n): %d; the old server does not serve them.\n' % inactive)
     if not report['traffic']:
         out.write('Traffic statistics (web_traffic) are not available on the old panel.\n')
 
@@ -1327,7 +1935,7 @@ def check_sites_options(args):
 
 
 def run_sites(args):
-    config = read_json(args.config)
+    config = select_source(read_json(args.config), args.source_name)
     report = site_inventory(config, resolvers=args.resolvers, extra_old=args.old_ip, extra_new=args.new_ip)
     print_sites(report, args.states, as_json=args.json)
 
@@ -1351,6 +1959,13 @@ def interactive(migration, *, sync=False):
             tree = migration.directory / ('round-%03d' % migration.state['round']) / 'tree'
             print('Prepared files: ' + str(tree))
             print('Database credentials: ' + str(migration.directory / 'database-map.json'))
+            report_file = tree.parent / 'configuration-report.json'
+            if report_file.exists():
+                report = read_json(report_file)
+                for label, key in (('Review by hand', 'manual_files'), ('Still names the old Plesk webspace', 'old_path_references'),
+                                   ('No configuration found for database', 'databases_needing_manual_config')):
+                    if report.get(key):
+                        print('%s: %s' % (label, ', '.join(report[key][:20]) + (' …' if len(report[key]) > 20 else '')))
             confirm('Have you updated and reviewed the application database configuration in the prepared files? Publish this copy?')
         migration.publish(config_reviewed=True)
         return
@@ -1371,6 +1986,7 @@ def parse_args(argv=None):
             prog='ispcp-migrate --sites' if simple else 'migrate.py sites',
             description='List the old ISPConfig websites and where their public DNS points.')
         parser.add_argument('--config', default=DEFAULT_CONFIG, help='Connection settings (normally configured once)')
+        parser.add_argument('--from', dest='source_name', metavar='NAME', help='Old server from "sources" in the configuration, e.g. plesk')
         sites_options(parser)
         args = parser.parse_args(argv[2:] if simple else argv[1:])
         try:
@@ -1381,16 +1997,19 @@ def parse_args(argv=None):
         return args
     if argv and argv[0] == '--simple':
         parser = argparse.ArgumentParser(prog='ispcp-migrate', description='Migrate a website to an existing new ISPConfig client.',
-                                         epilog='Which old websites are live (DNS): ispcp-migrate --sites')
-        parser.add_argument('domain', help='Domain on the old ISPConfig')
+                                         epilog='Which old websites are live (DNS): ispcp-migrate --sites [--from plesk]')
+        parser.add_argument('domain', help='Domain on the old ISPConfig (or the --from server)')
         parser.add_argument('client_id', type=int, help='Client ID in the NEW ISPConfig (not WHMCS)')
         actions = parser.add_mutually_exclusive_group()
         actions.add_argument('--plan', dest='command', action='store_const', const='plan', help='Only show the migration plan')
         actions.add_argument('--sync', dest='command', action='store_const', const='interactive_sync', help='Take a new source snapshot after the first migration')
         actions.add_argument('--status', dest='command', action='store_const', const='status', help='Show saved progress')
         parser.add_argument('--config', default=DEFAULT_CONFIG, help='Connection settings (normally configured once)')
+        parser.add_argument('--from', dest='source_name', metavar='NAME', help='Old server from "sources" in the configuration, e.g. plesk')
         parser.add_argument('--state', help='Existing state directory from a manual migration; normally state_dir/DOMAIN')
         parser.add_argument('--php', metavar='VERSION', help='PHP version of the new website, e.g. 5.6 (default: target.server_php_id)')
+        parser.add_argument('--database', action='append', metavar='NAME',
+                            help='Plesk: migrate exactly this database of the subscription (repeatable; default: those of the domain)')
         parser.set_defaults(command='interactive', source_quiesced=False, target_quiesced=False, config_reviewed=False)
         args = parser.parse_args(argv[1:])
         try:
@@ -1410,6 +2029,8 @@ def parse_args(argv=None):
     parser.add_argument('--target-quiesced', action='store_true', help='With sync: confirm target writes/cron are also stopped')
     parser.add_argument('--config-reviewed', action='store_true', help='With publish: manually patched staged non-WordPress configs')
     parser.add_argument('--php', metavar='VERSION', help='With plan/run: PHP version of the new website, e.g. 5.6')
+    parser.add_argument('--database', action='append', metavar='NAME', help='Plesk: migrate exactly this database (repeatable)')
+    parser.add_argument('--from', dest='source_name', metavar='NAME', help='Old server from "sources" in the configuration, e.g. plesk')
     return parser.parse_args(argv)
 
 
@@ -1423,7 +2044,7 @@ def main(argv=None):
             return 0
         for command in ('ssh', 'rsync', 'php'):
             require(shutil.which(command), 'Install required local command: ' + command)
-        config = read_json(args.config)
+        config = select_source(read_json(args.config), args.source_name)
         if args.state is None:
             args.state = str(state_root(config) / args.domain)
             legacy = DEFAULT_STATE / args.domain
@@ -1440,6 +2061,7 @@ def main(argv=None):
                 raise MigrationError('Another process is using this migration state') from None
             migration = Migration(config, state_dir, args.domain, args.client_id)
             migration.php_version = args.php
+            migration.databases = args.database
             if args.command == 'plan':
                 migration.plan()
             elif args.command == 'status':
