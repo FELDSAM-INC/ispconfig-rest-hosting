@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-11-08
+
 ### Fixed
 
 - WordPress tools on websites with PHP 5.6 to 7.4 failed with "the matching PHP CLI runtime is unavailable"
@@ -16,7 +18,7 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Upgrade notes
 
-- `ispconfig-rest extension:update hosting --tag vX.Y.Z && ispconfig-rest server-tools update --components file-manager --yes`
+- `ispconfig-rest extension:update hosting --tag v1.6.1 && ispconfig-rest server-tools update --components file-manager --yes`
   updates the WordPress sandbox on the web servers.
 
 ## [1.6.0] - 2026-11-08
