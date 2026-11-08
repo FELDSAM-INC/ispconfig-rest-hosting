@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-11-08
+
 ### Fixed
 
 - WordPress checks and scans no longer fail with `site_not_applied` on a website whose `web_folder` is `''` on the
@@ -14,6 +16,11 @@ versions follow [Semantic Versioning](https://semver.org/).
 - A missing or broken PHP CLI for the website's PHP version is reported as `unsupported_php_layout` instead of
   `worker_failed`. Other unexpected sandbox failures write their exception class, file and line to the
   `ispconfig-rest-wordpress` journal (`wordpress_sandbox_failed`), never messages or site content.
+
+### Upgrade notes
+
+- `ispconfig-rest extension:update hosting --tag v1.3.4 && ispconfig-rest server-tools update --components file-manager`
+  installs the WordPress worker on the web servers and restarts it. No migrations.
 
 ## [1.3.3] - 2026-11-07
 
