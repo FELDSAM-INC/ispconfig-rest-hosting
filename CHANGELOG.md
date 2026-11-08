@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-08
+
 ### Added
 
 - Let's Encrypt once the domain points to the server (spec 059): `PUT /sites/web-domains/{id}/ssl/letsencrypt-wait`
@@ -19,7 +21,7 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Upgrade notes
 
-- `ispconfig-rest extension:update hosting --tag vX.Y.Z` adds the table and the `letsencrypt:wait` task of the API
+- `ispconfig-rest extension:update hosting --tag v1.6.0` adds the table and the `letsencrypt:wait` task of the API
   scheduler (run `ispconfig-rest schedule:install` if `/etc/cron.d/ispconfig-rest` is missing). The
   panel needs outgoing DNS (UDP 53) to the resolvers, and ISPConfig's server IP list must hold the web servers'
   public addresses, IPv6 included where domains have AAAA records; behind NAT set `LETSENCRYPT_WAIT_SERVER_ADDRESSES`.
