@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-08
+
 ### Added
 
 - `ispcp-migrate --from plesk` migrates websites of a Plesk Obsidian (Linux) server, and `ispcp-migrate --sites --from
@@ -18,6 +20,13 @@ versions follow [Semantic Versioning](https://semver.org/).
   listed for manual review. Configuration files that still name the old webspace (e.g. Wordfence's `.user.ini`) stop
   publication for review. Everything else is listed in the plan. A wildcard subdomain the client's plan does not allow
   stops the migration before any write, for ISPConfig sources too.
+
+### Upgrade notes
+
+- `ispconfig-rest extension:update hosting --tag v1.4.0 && ispconfig-rest server-tools update --components migration --server 4`
+  installs `plesk-source.py`. Existing configuration and migration state are unchanged; add the Plesk server under
+  `sources` in `/etc/ispconfig-rest-migration/config.json` (see the migration README) and give root on the new web
+  server key-based SSH to it with a verified host key.
 
 ## [1.3.4] - 2026-11-08
 
