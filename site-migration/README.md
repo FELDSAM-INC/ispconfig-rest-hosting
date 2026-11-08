@@ -255,6 +255,11 @@ of a URL-only plan are listed as `MANUAL` and not created. Duplicate jobs are cr
 paths belong to the subscription's main domain. All created jobs are **inactive**: the old server keeps running
 them until the DNS switch, so enable them in ISPConfig/WHMCS then and stop them in Plesk.
 
+WordPress cron is not migrated: WP Toolkit's jobs (`php -f httpdocs/wp-cron.php`, with or without its description)
+and fetches of `wp-cron.php` are left out, and the plan says so in one note. After the DNS switch turn on the
+WordPress cron of the website in WHMCS (WordPress tools). WP Toolkit usually disables WordPress's own cron
+(`DISABLE_WP_CRON` in `wp-config.php`), so scheduled WordPress tasks wait until then.
+
 **Old paths.** Configuration files in the copy that still name the old webspace (`.htaccess`, `.user.ini`,
 `php.ini`, `.env`, `wp-config.php`, `wordfence-waf.php`, PHP/ini files directly in the document root) are listed
 in `configuration-report.json` (`old_path_references`) and stop publication for review, like other manual

@@ -5,6 +5,13 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `ispcp-migrate --from plesk` no longer migrates WordPress cron: WP Toolkit's jobs (`php -f httpdocs/wp-cron.php`,
+  whatever their PHP version or description) and fetches of `wp-cron.php` are left out, with one note in the plan to
+  turn on the website's WordPress cron in the panel after the DNS switch. Websites migrated earlier keep their
+  inactive `wp-cron.php` job; delete it before turning the WordPress cron on, it counts against the cron job limit.
+
 ## [1.6.1] - 2026-11-08
 
 ### Fixed

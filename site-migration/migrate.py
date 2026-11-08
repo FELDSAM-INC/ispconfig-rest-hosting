@@ -417,6 +417,9 @@ CRON_MACROS = {'@hourly': '0 * * * *', '@daily': '0 0 * * *', '@midnight': '0 0 
                '@monthly': '0 0 1 * *', '@yearly': '0 0 1 1 *', '@annually': '0 0 1 1 *'}
 # Output discarded to /dev/null at the end of a command is kept as written; other shell syntax is reviewed by hand.
 CRON_REDIRECT = re.compile(r'\s+(?:(?:1?>|>>)\s*/dev/null(?:\s+2>&1)?|2>&1\s+(?:1?>|>>)\s*/dev/null|&>\s*/dev/null)\s*\Z')
+# WordPress cron of WP Toolkit (php -f httpdocs/wp-cron.php, or a fetch of /wp-cron.php): not migrated, the website's
+# WordPress cron is turned on in the panel instead.
+WORDPRESS_CRON = re.compile(r'(?:\A|[\s/\'"=])wp-cron\.php(?:[\s\'"?#]|\Z)')
 CRON_PHP = re.compile(r'(?:/opt/alt/php[0-9]+/usr/bin/php|/opt/plesk/php/[0-9]+\.[0-9]+/bin/php|/usr/(?:local/)?bin/php[0-9.]*|php[0-9.]*)\Z')
 
 
@@ -728,7 +731,7 @@ def plesk_inventory(rows, account, domain, databases=None):
                      if row['id'] != site['id'] and str(row['www_root'] or '').startswith(home + '/')}
     entries = sorted(set(account['entries']))
     cron, seen = [], set()
-    skipped_cron = 0
+    skipped_cron = wordpress_cron = 0
     for job in parse_crontab(account['crontab']):
         result = plesk_cron_job(job, home=home, entries=entries, folders=[(folder, 'web')])
         owner = result.pop('owner')
@@ -740,6 +743,9 @@ def plesk_inventory(rows, account, domain, databases=None):
         if not (owner == 'site' or owner == 'any' and not site['webspace_id'] and not site['parent_id']):
             skipped_cron += 1
             continue
+        if WORDPRESS_CRON.search(job['command']):
+            wordpress_cron += 1
+            continue
         # The same job twice (often with two PHP versions) would run twice on the new website.
         key = json.dumps([result['schedule'], result.get('url'), result.get('suffix'), result.get('reason') and result['source'],
                           [word if isinstance(word, str) or 'path' in word else 'php' for word in result.get('words', [])]])
@@ -750,6 +756,10 @@ def plesk_inventory(rows, account, domain, databases=None):
         cron.append(result)
     if skipped_cron:
         notes.append('%d cron job(s) of other websites of the subscription are left to their own migration' % skipped_cron)
+    if wordpress_cron:
+        notes.append('WordPress cron (WP Toolkit, %d job(s) running wp-cron.php) is not migrated: turn on the WordPress cron '
+                     "in the panel's WordPress tools after the DNS switch. WP Toolkit usually disables WordPress's own cron "
+                     '(DISABLE_WP_CRON), so scheduled WordPress tasks wait until then.' % wordpress_cron)
     return {
         'source': 'plesk',
         'site': {'domain_id': site['id'], 'server_id': 'plesk', 'domain': domain, 'type': 'vhost', 'document_root': home,

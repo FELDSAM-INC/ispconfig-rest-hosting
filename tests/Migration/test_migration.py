@@ -589,7 +589,12 @@ PLESK_CRONTAB = """MAILTO=""
 SHELL="/bin/sh"
 #@desc: Running wp-cron.php for WordPress at https://shop.test
 3,33\t*\t*\t*\t*\t/opt/alt/php74/usr/bin/php -f 'httpdocs/wp-cron.php'
+#@desc: Spuštěn soubor wp-cron.php pro WordPress na adrese https://shop.test
 3,33\t*\t*\t*\t*\t/opt/alt/php81/usr/bin/php -f 'httpdocs/wp-cron.php'
+0 * * * * curl -fsS 'https://shop.test/wp-cron.php?doing_wp_cron'
+#@desc: Feed import
+7,37\t*\t*\t*\t*\t/opt/alt/php74/usr/bin/php -f 'httpdocs/feed.php'
+7,37\t*\t*\t*\t*\t/opt/alt/php81/usr/bin/php -f 'httpdocs/feed.php'
 SHELL="/usr/local/psa/bin/chrootsh"
 */5 * * * * /opt/plesk/php/8.2/bin/php -q /var/www/vhosts/shop.test/httpdocs/blog/cron.php >/dev/null 2>&1
 0 4 * * * /httpdocs/tools/run --root=/httpdocs/var
@@ -662,13 +667,21 @@ class PleskTests(unittest.TestCase):
             self.assertIsNone(m.cron_decision(job, client), source)
             return m.render_cron(job, document_root=root, cron_type=cron_type, php_cli='/usr/bin/php8.1')
 
-        self.assertEqual('/usr/bin/php8.1 -f %s/web/wp-cron.php' % root, target("/opt/alt/php74/usr/bin/php -f 'httpdocs/wp-cron.php'"))
-        self.assertEqual('/usr/bin/php8.1 -f /web/wp-cron.php', target("/opt/alt/php74/usr/bin/php -f 'httpdocs/wp-cron.php'", 'chrooted'))
+        self.assertEqual('/usr/bin/php8.1 -f %s/web/feed.php' % root, target("/opt/alt/php74/usr/bin/php -f 'httpdocs/feed.php'"))
+        self.assertEqual('/usr/bin/php8.1 -f /web/feed.php', target("/opt/alt/php74/usr/bin/php -f 'httpdocs/feed.php'", 'chrooted'))
         self.assertEqual('/usr/bin/php8.1 -q %s/web/blog/cron.php >/dev/null 2>&1' % root,
                          target('/opt/plesk/php/8.2/bin/php -q /var/www/vhosts/shop.test/httpdocs/blog/cron.php >/dev/null 2>&1'))
         self.assertEqual('%s/web/tools/run --root=%s/web/var' % (root, root), target('/httpdocs/tools/run --root=/httpdocs/var'))
         self.assertEqual('https://shop.test/cron?token=x', target("curl -fsS 'https://shop.test/cron?token=x'"))
-        self.assertEqual('Running wp-cron.php for WordPress at https://shop.test', jobs["/opt/alt/php74/usr/bin/php -f 'httpdocs/wp-cron.php'"]['description'])
+        self.assertEqual('Feed import', jobs["/opt/alt/php74/usr/bin/php -f 'httpdocs/feed.php'"]['description'])
+        # WP Toolkit's WordPress cron is turned on in the panel instead, whatever its PHP, description or form.
+        self.assertEqual([], [source for source in jobs if 'wp-cron' in source])
+        self.assertIn('WordPress cron (WP Toolkit, 3 job(s) running wp-cron.php) is not migrated', '\n'.join(self.inventory()['notes']))
+        for command, wordpress in (("php -f 'httpdocs/wp-cron.php'", True), ('wget -q -O - https://a.test/wp-cron.php', True),
+                                   ('php /httpdocs/wp-cron.php >/dev/null 2>&1', True), ('php httpdocs/my-wp-cron.php', False),
+                                   ('php httpdocs/wp-cron.php.bak', False)):
+            with self.subTest(command=command):
+                self.assertEqual(wordpress, bool(m.WORDPRESS_CRON.search(command)))
         # Another website's job stays with its own migration; a URL of another host belongs to the subscription.
         self.assertNotIn('php /addon.test/cron.php', jobs)
         self.assertIn('wget -q -O /dev/null https://elsewhere.test/ping', jobs)

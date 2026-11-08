@@ -281,8 +281,10 @@ def plesk_fixture():
     for path in (Path('/var/www'), Path('/var/www/vhosts')):
         path.chmod(0o755)
     PLESK_HOME.chmod(0o710)
+    # WP Toolkit's WordPress cron stays behind; the feed import is migrated.
     crontab = ('MAILTO=""\nSHELL="/bin/sh"\n#@desc: Running wp-cron.php for WordPress at https://shop.test\n'
                "3,33\t*\t*\t*\t*\t/opt/alt/php81/usr/bin/php -f 'httpdocs/wp-cron.php'\n"
+               "#@desc: Feed import\n7,37\t*\t*\t*\t*\t/opt/alt/php81/usr/bin/php -f 'httpdocs/feed.php'\n"
                '0 * * * * php %s/addon.test/cron.php\n' % PLESK_HOME)
     subprocess.run(['crontab', '-u', 'shopuser', '-'], input=crontab.encode(), check=True)
 
@@ -328,7 +330,8 @@ def plesk_main():
         assert inventory['site']['subdomain'] == '*' and inventory['site']['system_user'] == 'shopuser'
         assert [(child['domain'], child['type']) for child in inventory['children']] == [('blog.shop.test', 'vhostsubdomain'), ('shop.example', 'alias')]
         assert inventory['not_copied'] == ['private-data'], inventory['not_copied']
-        assert [job['source'] for job in migration.state['cron_jobs']] == ["/opt/alt/php81/usr/bin/php -f 'httpdocs/wp-cron.php'"]
+        assert [job['source'] for job in migration.state['cron_jobs']] == ["/opt/alt/php81/usr/bin/php -f 'httpdocs/feed.php'"]
+        assert any(note.startswith('WordPress cron (WP Toolkit, 1 job(s)') for note in inventory['notes']), inventory['notes']
         sizes = migration.state['source_size']
         assert sizes['web_bytes'] > 0 and sizes['databases']['shop_wp'] > 0 and 'shop-old_db' in sizes['databases'], sizes
         # Files are read as the subscription's user: something only root can read stops the copy.
@@ -377,7 +380,7 @@ def plesk_main():
         assert [(row['domain'], row['web_folder']) for row in blog] == [('blog.shop.test', 'web/blog')], blog
         cron = [row for key, row in rows.items() if key.startswith('/sites/cron-jobs/')]
         assert [(row['command'], row['active'], row['run_min']) for row in cron] == [
-            ('/usr/bin/php -f %s/web/wp-cron.php' % target_root, False, '3,33')], cron
+            ('/usr/bin/php -f %s/web/feed.php' % target_root, False, '7,37')], cron
         # Final sync: new source rows and files, deleted files; the reviewed path is checked again.
         sql("INSERT INTO shop_wp.items VALUES (2, 'new');")
         (PLESK_HOME / 'httpdocs/delete-on-sync.txt').unlink()
@@ -395,7 +398,7 @@ def plesk_main():
         assert sql('SELECT COUNT(*) FROM `%s`.items' % wp['name']) == '2'
         assert not (target_root / 'web/delete-on-sync.txt').exists() and (target_root / 'web/new.txt').read_text() == 'new file'
         assert FakeApi.posts == posts, 'sync must not create objects again'
-        assert [job['source'] for job in migration.state['cron_jobs']] == ["/opt/alt/php81/usr/bin/php -f 'httpdocs/wp-cron.php'"]
+        assert [job['source'] for job in migration.state['cron_jobs']] == ["/opt/alt/php81/usr/bin/php -f 'httpdocs/feed.php'"]
         assert 'old secret' not in (Path(state) / 'state.json').read_text()
     # Nothing was written on the Plesk side: no option files, sources unchanged.
     assert not set(os.listdir('/tmp')) - temporary, set(os.listdir('/tmp')) - temporary
