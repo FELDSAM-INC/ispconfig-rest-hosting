@@ -389,6 +389,25 @@ class WordPressWorkerTest(unittest.TestCase):
             with self.assertRaisesRegex(sandbox.Unavailable, 'unsupported_php_layout'):
                 sandbox.runtime('/usr/bin/php8.9')
 
+    def test_php_before_8_gets_json_and_is_probed_without_it(self):
+        # PHP 5.6-7.4 packages build json as json.so; with -n json_encode() does not exist.
+        present = {'/usr/lib/php/20190902/json.so', '/usr/lib/php/20190902/mysqli.so', '/usr/lib/php/20190902/mysqlnd.so'}
+        probe = sandbox.subprocess.CompletedProcess([], 0, stdout=b'7.4\n/usr/lib/php/20190902')
+        with patch.object(sandbox, 'trusted', side_effect=lambda path, executable=False: str(path)), \
+                patch('builtins.open', unittest.mock.mock_open(read_data=b'\x7fELF')), \
+                patch.object(sandbox.pwd, 'getpwnam', return_value=type('Nobody', (), {'pw_uid': 65534, 'pw_gid': 65534})), \
+                patch.object(sandbox.pathlib.Path, 'exists', lambda path: str(path) in present), \
+                patch.object(sandbox.subprocess, 'run', return_value=probe) as run:
+            args = sandbox.runtime('/usr/bin/php7.4')
+        self.assertNotIn('json', run.call_args.args[0][3])
+        self.assertEqual(['extension=/usr/lib/php/20190902/json.so', 'extension=/usr/lib/php/20190902/mysqlnd.so', 'extension=/usr/lib/php/20190902/mysqli.so'],
+                         [value for value in args if value.startswith('extension=')])
+
+    def test_the_verification_probe_runs_on_php_5_6(self):
+        source = (WORKER / 'wordpress-tools.py').read_text()
+        probe = source[source.index('script = "<?php'):].split('\n', 1)[0]
+        self.assertNotIn('??', probe)
+
     def test_unexpected_tool_failure_reports_its_own_line(self):
         import subprocess
         output = subprocess.run([sys.executable, '-I', str(WORKER / 'wordpress-tools.py')], input=b'not json\n', capture_output=True, check=True).stdout

@@ -5,6 +5,20 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- WordPress tools on websites with PHP 5.6 to 7.4 failed with "the matching PHP CLI runtime is unavailable"
+  (`unsupported_php_layout`). The sandbox checked the CLI with `php -n` and `json_encode()`, but before PHP 8.0 json
+  is an extension of its own (`json.so`), which `-n` does not load; WP-CLI did not get it either. The check now uses
+  core functions only and `json.so` is loaded where it exists. The verification file served through the website no
+  longer uses `??`, which PHP 5.6 cannot parse. Checked with the Sury packages of PHP 5.6, 7.0, 7.4 and 8.3 and
+  WP-CLI 2.12.0.
+
+### Upgrade notes
+
+- `ispconfig-rest extension:update hosting --tag vX.Y.Z && ispconfig-rest server-tools update --components file-manager --yes`
+  updates the WordPress sandbox on the web servers.
+
 ## [1.6.0] - 2026-11-08
 
 ### Added

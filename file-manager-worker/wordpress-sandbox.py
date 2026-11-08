@@ -61,14 +61,16 @@ def runtime(php):
     # Read CLI-only extension configuration; never expose FPM pool files to a site.
     nobody = pwd.getpwnam('nobody')
     try:
-        info = subprocess.run([php, '-n', '-r', 'echo json_encode([PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION,ini_get("extension_dir")]);'], user=nobody.pw_uid, group=nobody.pw_gid, extra_groups=[], env={'PATH': '/usr/bin:/bin'}, capture_output=True, timeout=10, check=True)
+        # Core functions only: before PHP 8.0 json is an extension of its own, and -n loads none.
+        info = subprocess.run([php, '-n', '-r', 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION, "\\n", ini_get("extension_dir");'], user=nobody.pw_uid, group=nobody.pw_gid, extra_groups=[], env={'PATH': '/usr/bin:/bin'}, capture_output=True, timeout=10, check=True)
     except subprocess.CalledProcessError:
         raise Unavailable('unsupported_php_layout') from None
-    version, extension_dir = json.loads(info.stdout)
+    version, _, extension_dir = info.stdout.decode('utf-8', 'replace').partition('\n')
     if not re.fullmatch(r'[0-9]+\.[0-9]+', version) or not re.fullmatch(r'/usr/lib/php/[0-9]+', extension_dir):
         raise Unavailable('unsupported_php_layout')
     args = [php, '-n', '-d', 'memory_limit=256M', '-d', 'max_execution_time=300', '-d', 'date.timezone=UTC', '-d', 'error_reporting=22527', '-d', 'display_errors=stderr']
-    for name in ('mysqlnd', 'mysqli', 'mbstring', 'tokenizer', 'ctype', 'phar', 'iconv', 'curl', 'dom', 'xml', 'simplexml', 'xmlreader', 'xmlwriter', 'zip', 'intl'):
+    # json.so exists only before PHP 8.0, where WP-CLI needs it loaded like the others.
+    for name in ('json', 'mysqlnd', 'mysqli', 'mbstring', 'tokenizer', 'ctype', 'phar', 'iconv', 'curl', 'dom', 'xml', 'simplexml', 'xmlreader', 'xmlwriter', 'zip', 'intl'):
         so = pathlib.Path(extension_dir, name + '.so')
         if so.exists():
             trusted(so)

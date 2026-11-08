@@ -551,7 +551,7 @@ class Toolkit:
         name = '.ispcp-wp-probe-' + token + '.php'
         path = self.root / name
         expected = {'token': token, 'prefix': self.config_values()['table_prefix'], 'url': url}
-        script = "<?php if (time() > " + str(int(time.time()) + 600) + " || !hash_equals('" + token + "', $_SERVER['HTTP_X_ISPCP_WP_PROBE'] ?? '')) {http_response_code(404);exit;} ob_start(); require __DIR__ . '/wp-load.php'; ob_end_clean(); header('Cache-Control: no-store'); header('Content-Type: application/json'); echo json_encode(['token'=>'" + token + "','prefix'=>$GLOBALS['table_prefix'],'url'=>get_option('siteurl')]);"
+        script = "<?php if (time() > " + str(int(time.time()) + 600) + " || !hash_equals('" + token + "', isset($_SERVER['HTTP_X_ISPCP_WP_PROBE']) ? $_SERVER['HTTP_X_ISPCP_WP_PROBE'] : '')) {http_response_code(404);exit;} ob_start(); require __DIR__ . '/wp-load.php'; ob_end_clean(); header('Cache-Control: no-store'); header('Content-Type: application/json'); echo json_encode(['token'=>'" + token + "','prefix'=>$GLOBALS['table_prefix'],'url'=>get_option('siteurl')]);"
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
         with os.fdopen(fd, 'w') as output:
             output.write(script)
