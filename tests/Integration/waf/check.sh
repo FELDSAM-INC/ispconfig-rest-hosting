@@ -51,6 +51,33 @@ fi
 
 if [[ "$engine" = nginx ]]; then [[ -s /tmp/waf-original-error.log ]]; echo 'PASS nginx preserves original website error log'; fi
 
+# A path prefix ("/section/*") covers the pages below it, only for the selected argument, and not paths that the web
+# server resolves elsewhere through dot segments, encoded dots or repeated slashes.
+mkdir -p /tmp/waf-www/section/deep
+cp /tmp/waf-www/index.html /tmp/waf-www/section/page
+cp /tmp/waf-www/index.html /tmp/waf-www/section/index.html
+cp /tmp/waf-www/index.html /tmp/waf-www/section/deep/page
+cp /tmp/waf-www/index.html /tmp/waf-www/sectionx
+php /app/tests/Integration/waf/probe.php prefix
+if [[ "$engine" = apache ]]; then apache2ctl -t; apache2ctl graceful; else nginx -t; nginx -s reload; fi
+sleep .5
+raw() { curl -s --path-as-is -o /dev/null -w '%{http_code}' -H 'Host: waf.test' "http://127.0.0.1:$port$1"; }
+attack='q=1%27%20OR%201%3D1--'
+for path in /section/page /section/deep/page /section/; do
+    actual=$(request "$path?$attack")
+    [[ "$actual" = 200 ]] || { echo "$engine prefix $path expected 200 got $actual"; exit 1; }
+done
+for path in /sectionx /other /section/../other /section/deep/../../other /section/%2e%2e/other /section/%2E%2E/other \
+    /section//../other /section/./../other; do
+    # The web server serves these paths (no WAF finding), so the 403 below comes from the rule, not from routing.
+    [[ $(raw "$path") = 200 ]] || { echo "$engine prefix $path is not served"; exit 1; }
+    actual=$(raw "$path?$attack")
+    [[ "$actual" = 403 ]] || { echo "$engine prefix $path expected 403 got $actual"; exit 1; }
+done
+[[ $(request '/section/page?different=1%27%20OR%201%3D1--') = 403 ]]
+[[ $(curl -s -o /dev/null -w '%{http_code}' -H 'Host: other.test' "http://127.0.0.1:$port/section/page?$attack") = 403 ]]
+echo "PASS $engine path prefix exception: pages below it only, dot segments and encodings resolved"
+
 # Official WordPress Gutenberg exemption must affect only content at its known path.
 mkdir -p /tmp/waf-www/wp-json/wp/v2
 cp /tmp/waf-www/index.html /tmp/waf-www/wp-json/wp/v2/posts

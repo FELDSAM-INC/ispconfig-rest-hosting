@@ -16,6 +16,10 @@ if (isset(WebWafProfiles::PLUGINS[$mode])) {
 if ($mode === 'exclude') {
     $settings['exclusions'] = [['rule_id' => 942100, 'path' => '/allowed', 'parameter' => 'q']];
 }
+if ($mode === 'prefix') {
+    // CRS path traversal rules are excluded too: the traversal requests must reach /other to test the prefix.
+    $settings['exclusions'] = [['rule_id' => 942100, 'path' => '/section/*', 'parameter' => 'q'], ['rule_id' => 930100], ['rule_id' => 930110]];
+}
 if ($mode === 'allowip') {
     $settings['ip_allowlist'] = ['127.0.0.1'];
 }

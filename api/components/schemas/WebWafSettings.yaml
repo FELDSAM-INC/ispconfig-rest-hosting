@@ -19,7 +19,7 @@ properties:
       required: [rule_id]
       properties:
         rule_id: {type: integer, minimum: 1, maximum: 2147483647}
-        path: {type: string, maxLength: 512, description: Exact URL path, without query string; empty applies website-wide.}
+        path: {type: string, maxLength: 512, description: 'Exact URL path, without query string; a path ending in * is a prefix (/admin/pages/edit/* covers /admin/pages/edit/102), compared with the URL-decoded request path after dot segments and repeated slashes are removed, so the prefix itself contains no %, +, //, /./ or /../; empty applies website-wide.'}
         parameter: {type: string, maxLength: 128, description: Optional exact request argument name; empty excludes the entire rule.}
   ip_allowlist:
     type: array

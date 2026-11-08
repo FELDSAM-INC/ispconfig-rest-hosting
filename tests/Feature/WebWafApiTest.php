@@ -84,6 +84,7 @@ final class WebWafApiTest extends SitesApiTestCase
         return array_map(fn ($body) => [$body], [['mode' => 'Off'], ['enabled' => 'yes'], ['enabled' => null], ['license_key' => 'secret'], ['raw' => 'SecRuleEngine Off'],
             ['application_profile' => 'wordpress,ctl:ruleEngine=Off'], ['application_profile' => ['wordpress']], ['application_profile' => null], ['application_profile' => 'joomla'],
             ['exclusions' => [['rule_id' => 1, 'path' => "/x\nSecRuleEngine Off"]]], ['exclusions' => [['rule_id' => 1, 'path' => "/x' ; }"]]],
+            ['exclusions' => [['rule_id' => 1, 'path' => '/x/*/y']]], ['exclusions' => [['rule_id' => 1, 'path' => '/x/../y/*']]], ['exclusions' => [['rule_id' => 1, 'path' => '/x%2F*']]],
             ['exclusions' => [['rule_id' => 1, 'parameter' => 'q;ctl:ruleEngine=Off']]], ['exclusions' => [['rule_id' => '1-999999']]],
             ['exclusions' => [['rule_id' => 0]]], ['exclusions' => [['rule_id' => 1, 'unexpected' => 'x']]],
             ['ip_allowlist' => ['0.0.0.0/33']], ['ip_allowlist' => ['::/129']], ['ip_allowlist' => ['192.0.2.1"']]]);

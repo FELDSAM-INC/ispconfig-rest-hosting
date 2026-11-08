@@ -37,8 +37,8 @@ final class WebWafPolicy
             }
             $path = $row['path'] ?? '';
             $parameter = $row['parameter'] ?? '';
-            if (! is_string($path) || strlen($path) > 512 || ($path !== '' && ! preg_match('~\A/[a-zA-Z0-9/_.:@+,%=\-]*\z~D', $path))) {
-                throw new InvalidArgumentException('Use an exact URL path without a query string or special rule characters.');
+            if (! is_string($path) || ! self::validPath($path)) {
+                throw new InvalidArgumentException('Use an exact URL path, or a path prefix ending in *, without a query string or special rule characters.');
             }
             if (! is_string($parameter) || ! preg_match('/\A[a-zA-Z0-9_.\-]{0,128}\z/D', $parameter)) {
                 throw new InvalidArgumentException('Use a plain request argument name.');
@@ -65,6 +65,28 @@ final class WebWafPolicy
         return array_intersect_key(array_replace(self::DEFAULTS, $input), self::DEFAULTS);
     }
 
+    /**
+     * Empty (whole website), an exact path, or a prefix ending in "*". The request path is URL-decoded and its dot
+     * segments and repeated slashes removed before the prefix comparison, as the web server does before it maps the
+     * request, so the prefix itself must already be in that form: no percent-encoding, "+", "//", "/./" or "/../".
+     */
+    public static function validPath(string $path): bool
+    {
+        if ($path === '') {
+            return true;
+        }
+        if (strlen($path) > 512) {
+            return false;
+        }
+        if (str_ends_with($path, '*')) {
+            $prefix = substr($path, 0, -1);
+
+            return preg_match('~\A/[a-zA-Z0-9/_.:@,=\-]*\z~D', $prefix) === 1 && ! preg_match('~//|/\.\.?/~', $prefix);
+        }
+
+        return preg_match('~\A/[a-zA-Z0-9/_.:@+,%=\-]*\z~D', $path) === 1;
+    }
+
     public static function identity(array $site): string
     {
         return (int) ($site['domain_id'] ?? $site['id'] ?? 0).'-'.substr(hash('sha256', implode(':', [$site['server_id'], $site['sys_groupid'], $site['domain']])), 0, 24);
@@ -84,7 +106,15 @@ final class WebWafPolicy
         foreach ($settings['exclusions'] as $index => $entry) {
             $action = $entry['parameter'] === '' ? 'ctl:ruleRemoveById='.$entry['rule_id'] : 'ctl:ruleRemoveTargetById='.$entry['rule_id'].';ARGS:'.$entry['parameter'];
             $options = 'id:'.(20000 + $index).',phase:1,pass,nolog,'.$action;
-            $lines[] = $entry['path'] === '' ? 'SecAction "'.$options.'"' : 'SecRule REQUEST_FILENAME "@streq '.$entry['path'].'" "'.$options.'"';
+            $normalized = 'id:'.(20000 + $index).',phase:1,pass,t:none,t:urlDecodeUni,t:normalizePath,nolog,'.$action;
+            if ($entry['path'] === '') {
+                $lines[] = 'SecAction "'.$options.'"';
+            } elseif (str_ends_with($entry['path'], '*')) {
+                // Compare the path the web server serves: "/prefix/%2e%2e/elsewhere" must not match the prefix.
+                $lines[] = 'SecRule REQUEST_FILENAME "@beginsWith '.substr($entry['path'], 0, -1).'" "'.$normalized.'"';
+            } else {
+                $lines[] = 'SecRule REQUEST_FILENAME "@streq '.$entry['path'].'" "'.$options.'"';
+            }
         }
         $lines[] = 'Include /etc/ispconfig-waf/owasp.conf';
         if ($settings['atomic']) {

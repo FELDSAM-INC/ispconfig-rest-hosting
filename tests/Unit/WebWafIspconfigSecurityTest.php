@@ -39,7 +39,8 @@ RULES;
             self::assertFalse($this->blocked($merged, $line));
         }
         $site = ['domain_id' => 19, 'server_id' => 1, 'sys_groupid' => 2, 'domain' => 'example.test'];
-        $policy = WebWafPolicy::compile($site, 'apache', array_replace(WebWafPolicy::DEFAULTS, ['enabled' => true, 'application_profile' => 'wordpress', 'atomic' => true]));
+        $policy = WebWafPolicy::compile($site, 'apache', array_replace(WebWafPolicy::DEFAULTS, ['enabled' => true, 'application_profile' => 'wordpress', 'atomic' => true,
+            'exclusions' => [['rule_id' => 942100, 'path' => '/admin/pages/edit/*', 'parameter' => 'q'], ['rule_id' => 942200, 'path' => '/search'], ['rule_id' => 942300]], 'ip_allowlist' => ['192.0.2.1']]));
         foreach (explode("\n", $policy) as $line) {
             self::assertFalse($this->blocked($merged, $line), $line);
         }
