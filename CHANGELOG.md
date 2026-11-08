@@ -5,6 +5,16 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- WordPress checks and scans no longer fail with `site_not_applied` on a website whose `web_folder` is `''` on the
+  panel and `NULL` on the web server. ISPConfig's datalog does not replicate that difference, so the worker now
+  treats them as equal, as ISPConfig does; every other difference between the panel and the web server copy is
+  still refused.
+- A missing or broken PHP CLI for the website's PHP version is reported as `unsupported_php_layout` instead of
+  `worker_failed`. Other unexpected sandbox failures write their exception class, file and line to the
+  `ispconfig-rest-wordpress` journal (`wordpress_sandbox_failed`), never messages or site content.
+
 ## [1.3.3] - 2026-11-07
 
 ### Added

@@ -127,6 +127,35 @@ final class WordPressWorkerResponsivenessTest extends TestCase
         self::assertNull($next->invoke($worker, ['check', 'secure', 'scan', 'cron']));
     }
 
+    public function test_applied_site_check_treats_null_and_empty_as_ispconfig_replication_does(): void
+    {
+        $master = new PDO('sqlite::memory:');
+        $master->exec('CREATE TABLE web_domain (domain_id INTEGER, server_id INTEGER, sys_groupid INTEGER, domain TEXT, system_user TEXT, system_group TEXT, document_root TEXT, web_folder TEXT, active TEXT, type TEXT, apache_directives TEXT)');
+        $master->exec('CREATE TABLE sys_group (groupid INTEGER, client_id INTEGER)');
+        $master->exec('CREATE TABLE client (client_id INTEGER, locked TEXT)');
+        $master->exec('CREATE TABLE server (server_id INTEGER, config TEXT)');
+        $master->exec("INSERT INTO sys_group VALUES (4,3); INSERT INTO client VALUES (3,'n'); INSERT INTO server VALUES (1,'[web]\nserver_type=apache');");
+        $master->exec("INSERT INTO web_domain VALUES (4,1,4,'hotel.invalid','web4','client3','/var/www/clients/client3/web4','','y','vhost','')");
+        $job = ['id' => 'job', 'website_id' => 4, 'identity' => 'stale', 'request' => json_encode(['action' => 'check', 'public_root' => '/var/www/clients/client3/web4/web'])];
+        $run = function (string $folder, string $root) use ($master, $job): string {
+            $local = new PDO('sqlite::memory:');
+            $local->exec('CREATE TABLE web_domain (domain_id INTEGER, server_id INTEGER, sys_groupid INTEGER, domain TEXT, system_user TEXT, system_group TEXT, document_root TEXT, web_folder TEXT, active TEXT, type TEXT)');
+            $local->exec("INSERT INTO web_domain VALUES (4,1,'4','hotel.invalid','web4','client3','$root',$folder,'y','vhost')");
+            try {
+                (new ReflectionMethod($worker = $this->worker($master, $local), 'process'))->invoke($worker, $job);
+            } catch (\RuntimeException $error) {
+                return $error->getMessage();
+            }
+
+            return 'passed';
+        };
+        // Past the applied check, the stale job identity is the next refusal.
+        self::assertSame('site_changed', $run('NULL', '/var/www/clients/client3/web4'));
+        self::assertSame('site_changed', $run("''", '/var/www/clients/client3/web4'));
+        self::assertSame('site_not_applied', $run("'shop'", '/var/www/clients/client3/web4'));
+        self::assertSame('site_not_applied', $run('NULL', '/var/www/clients/client3/web5'));
+    }
+
     public function test_background_refresh_preserves_private_state_and_skips_changed_identity_and_busy_sites(): void
     {
         $db = new PDO('sqlite::memory:');

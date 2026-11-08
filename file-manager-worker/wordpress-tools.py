@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.parse
 import zipfile
 
@@ -1017,8 +1018,8 @@ if __name__ == '__main__':
         if isinstance(error, CronFailure):
             result['output'] = error.output
         if not isinstance(error, Failure):
-            trace = error.__traceback__
-            while trace.tb_next:
-                trace = trace.tb_next
-            result['diagnostic'] = {'exception': type(error).__name__, 'line': trace.tb_lineno}
+            # The deepest line of this file says more than one inside the standard library.
+            frames = traceback.extract_tb(error.__traceback__)
+            own = [frame for frame in frames if os.path.basename(frame.filename) == os.path.basename(__file__)] or frames
+            result['diagnostic'] = {'exception': type(error).__name__, 'line': own[-1].lineno, 'file': os.path.basename(own[-1].filename)}
         print(json.dumps(result))

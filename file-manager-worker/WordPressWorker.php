@@ -458,7 +458,9 @@ final class WordPressWorker
         // Master approval is not enough: a remote server must have applied the same identity locally.
         $local = $this->localOne('SELECT * FROM web_domain WHERE domain_id = ? AND server_id = ?', [$job['website_id'], $this->server]);
         foreach (['sys_groupid', 'domain', 'document_root', 'web_folder', 'system_user', 'system_group', 'active', 'type'] as $key) {
-            if (! $local || $site[$key] !== $local[$key]) {
+            // ISPConfig's datalog compares loosely, so NULL and '' never replicate as a change
+            // (a vhost's unused web_folder can differ this way); any other difference is real.
+            if (! $local || (string) $site[$key] !== (string) $local[$key]) {
                 throw new RuntimeException('site_not_applied');
             }
         }
@@ -546,8 +548,9 @@ final class WordPressWorker
             $diagnostic = $result['diagnostic'] ?? null;
             if (is_array($diagnostic) && is_string($diagnostic['exception'] ?? null) && preg_match('/\A[A-Za-z_]{1,64}\z/D', $diagnostic['exception'])
                 && is_int($diagnostic['line'] ?? null) && $diagnostic['line'] > 0 && $diagnostic['line'] < 10000) {
-                error_log(json_encode(['event' => 'wordpress_sandbox_failed', 'job' => $job['id'], 'website_id' => (int) $job['website_id'],
-                    'exception' => $diagnostic['exception'], 'line' => $diagnostic['line']], JSON_THROW_ON_ERROR));
+                $file = is_string($diagnostic['file'] ?? null) && preg_match('/\A[A-Za-z0-9_-]{1,60}\.py\z/D', $diagnostic['file']) ? $diagnostic['file'] : null;
+                error_log(json_encode(['event' => 'wordpress_sandbox_failed', 'job' => $job['id'], 'website_id' => (int) $job['website_id'], 'action' => $job['action'],
+                    'exception' => $diagnostic['exception'], 'file' => $file, 'line' => $diagnostic['line']], JSON_THROW_ON_ERROR));
             }
             $error = is_string($result['error']) && preg_match('/\A[a-z_]{1,64}\z/D', $result['error']) ? $result['error'] : 'worker_failed';
             $this->finish($job, ! empty($result['recovery_required']) ? 'recovery_required' : 'failed', $error);

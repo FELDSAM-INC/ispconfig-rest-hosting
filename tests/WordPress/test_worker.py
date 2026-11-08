@@ -368,5 +368,33 @@ class WordPressWorkerTest(unittest.TestCase):
             with self.assertRaises(sandbox.Unavailable):
                 sandbox.cleanup(['../keep'])
 
+    def test_unexpected_sandbox_failure_names_only_its_class_and_line(self):
+        self.assertEqual({'error': 'site_changed'}, sandbox.failure(sandbox.Unavailable('site_changed')))
+        with patch.object(sandbox.pwd, 'getpwnam', side_effect=KeyError("getpwnam(): name not found: 'web8'")):
+            try:
+                sandbox.account({'system_user': 'web8', 'system_group': 'client6'})
+            except KeyError as error:
+                result = sandbox.failure(error)
+        line = next(number for number, text in enumerate((WORKER / 'wordpress-sandbox.py').read_text().splitlines(), 1) if 'pwd.getpwnam(site' in text)
+        self.assertEqual({'error': 'worker_failed', 'diagnostic': {'exception': 'KeyError', 'line': line, 'file': 'wordpress-sandbox.py'}}, result)
+        self.assertNotIn('web8', json.dumps(result))
+
+    def test_missing_or_broken_php_cli_is_reported_as_php_layout(self):
+        with self.assertRaisesRegex(sandbox.Unavailable, 'unsupported_php_layout'):
+            sandbox.runtime('/nonexistent/php8.9')
+        with patch.object(sandbox, 'trusted', side_effect=lambda path, executable=False: str(path)), \
+                patch('builtins.open', unittest.mock.mock_open(read_data=b'\x7fELF')), \
+                patch.object(sandbox.pwd, 'getpwnam', return_value=type('Nobody', (), {'pw_uid': 65534, 'pw_gid': 65534})), \
+                patch.object(sandbox.subprocess, 'run', side_effect=sandbox.subprocess.CalledProcessError(255, 'php')):
+            with self.assertRaisesRegex(sandbox.Unavailable, 'unsupported_php_layout'):
+                sandbox.runtime('/usr/bin/php8.9')
+
+    def test_unexpected_tool_failure_reports_its_own_line(self):
+        import subprocess
+        output = subprocess.run([sys.executable, '-I', str(WORKER / 'wordpress-tools.py')], input=b'not json\n', capture_output=True, check=True).stdout
+        result = json.loads(output)
+        self.assertEqual('wp_cli_failed', result['error'])
+        self.assertEqual({'exception': 'JSONDecodeError', 'file': 'wordpress-tools.py'}, {k: result['diagnostic'][k] for k in ('exception', 'file')})
+
 if __name__ == '__main__':
     unittest.main()

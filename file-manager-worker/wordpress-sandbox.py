@@ -16,6 +16,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import traceback
 
 from reconcile import open_directory
 
@@ -47,7 +48,10 @@ def identity(site, root):
 
 
 def runtime(php):
-    php = trusted(php, True)
+    try:
+        php = trusted(php, True)
+    except FileNotFoundError:
+        raise Unavailable('unsupported_php_layout') from None  # The site's PHP version has no CLI package.
     with open(php, 'rb') as executable:
         if executable.read(4) != b'\x7fELF':
             raise Unavailable('unsupported_php_layout')
@@ -56,7 +60,10 @@ def runtime(php):
     trusted(RUNTIME / 'wordpress-tools.py')
     # Read CLI-only extension configuration; never expose FPM pool files to a site.
     nobody = pwd.getpwnam('nobody')
-    info = subprocess.run([php, '-n', '-r', 'echo json_encode([PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION,ini_get("extension_dir")]);'], user=nobody.pw_uid, group=nobody.pw_gid, extra_groups=[], env={'PATH': '/usr/bin:/bin'}, capture_output=True, timeout=10, check=True)
+    try:
+        info = subprocess.run([php, '-n', '-r', 'echo json_encode([PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION,ini_get("extension_dir")]);'], user=nobody.pw_uid, group=nobody.pw_gid, extra_groups=[], env={'PATH': '/usr/bin:/bin'}, capture_output=True, timeout=10, check=True)
+    except subprocess.CalledProcessError:
+        raise Unavailable('unsupported_php_layout') from None
     version, extension_dir = json.loads(info.stdout)
     if not re.fullmatch(r'[0-9]+\.[0-9]+', version) or not re.fullmatch(r'/usr/lib/php/[0-9]+', extension_dir):
         raise Unavailable('unsupported_php_layout')
@@ -425,10 +432,19 @@ def main():
     print(json.dumps(result))
 
 
+def failure(error):
+    # Do not reveal WP output, SQL, configuration values, credentials or exception bodies.
+    if isinstance(error, Unavailable):
+        return {'error': str(error)}
+    # Only the class and this script's line reach the root service journal.
+    frames = traceback.extract_tb(error.__traceback__)
+    own = [frame for frame in frames if os.path.basename(frame.filename) == os.path.basename(__file__)] or frames
+    return {'error': 'worker_failed', 'diagnostic': {'exception': type(error).__name__, 'line': own[-1].lineno if own else 0,
+                                                     'file': os.path.basename(__file__)}}
+
+
 if __name__ == '__main__':
     try:
         main()
     except Exception as error:
-        # Do not reveal WP output, SQL, configuration values, credentials or exception bodies.
-        safe = str(error) if isinstance(error, Unavailable) else 'worker_failed'
-        print(json.dumps({'error': safe}))
+        print(json.dumps(failure(error)))
