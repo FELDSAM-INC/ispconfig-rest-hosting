@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runs the real Migration.preflight() and provision() for MigrationProvisioningTest.
+"""Runs the real Migration.preflight() and provision() (and the DNS zones of a Plesk website) for MigrationProvisioningTest.
 
 Every REST call is written to stdout as one JSON line and answered on stdin by
 the PHP test, which dispatches it to the actual API controllers. SSH, file and
@@ -59,12 +59,21 @@ def main():
                     del payload['database_quota']
                 return create(name, endpoint, payload)
             migration.create = legacy
+        migration.verify_dns = lambda plan: None  # no DNS server answers in the test
         try:
             try:
-                migration.php_version = request.get('php')
-                migration.select_php()
-                migration.preflight()
-                migration.provision()
+                if not request.get('dns_only'):
+                    migration.php_version = request.get('php')
+                    migration.select_php()
+                    migration.preflight()
+                    migration.provision()
+                if request.get('dns'):
+                    # Plesk's zone rows and public DNS are given; the zones are planned and created by the shipped code.
+                    public = request['dns']['public']
+                    plan = migration.prepare_dns(rows=request['dns']['rows'],
+                                                 lookup=lambda name: (public.get(name, []), None if name in public else 'NXDOMAIN'))
+                    m.check_counts(migration.usage_summary(), migration.dns_counts())
+                    migration.create_dns(plan)
             finally:
                 key = migration.state.get('client_key', {})
                 if 'id' in key:

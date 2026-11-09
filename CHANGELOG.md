@@ -5,6 +5,21 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `ispcp-migrate --from plesk` recreates the website's DNS zones in the new ISPConfig: the zones of the domain, its
+  aliases and the subdomains migrated with it, when Plesk serves them (switched on, and their public NS records
+  include one of the zone's Plesk name servers). Records, TTLs and SOA timers are copied; the zone's NS records and SOA
+  primary become the name servers of the client's DNS server, A/AAAA records with an address of the Plesk server get
+  the new web server's address, SPF/DMARC become ISPConfig's SPF/DMARC records (same rules, ISPConfig's order) and
+  DKIM is copied verbatim. What ISPConfig cannot hold (DMARC in a zone without DKIM, unusual SPF/DMARC, other record
+  types) and records it refuses are listed as `MANUAL`. The zones are created with the client's key after the copy
+  (inactive, the records, then switched on), and the plan checks the client's DNS limits. `--dns` creates only the
+  zones, e.g. for websites copied earlier; `--no-dns` skips them.
+- `ispcp-migrate --from plesk` gives the new website the PHP version of the Plesk domain (`alt-php74-fpm` → 7.4), and
+  each subdomain with its own folder its own version. A version the new web server does not offer stops the plan
+  before any write; `--php` chooses another one, for the website and its subdomains.
+
 ## [1.6.2] - 2026-11-08
 
 ### Changed

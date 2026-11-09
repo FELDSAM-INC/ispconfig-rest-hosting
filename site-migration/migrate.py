@@ -345,6 +345,7 @@ def php_configuration(rows, version, client_id):
 COUNT_LIMITS = {
     'web_domains': 'websites', 'web_alias_domains': 'alias domains', 'web_subdomains': 'subdomains',
     'database_users': 'database users', 'databases': 'databases', 'cron_jobs': 'cron jobs',
+    'dns_zones': 'DNS zones', 'dns_records': 'DNS records',
 }
 
 
@@ -647,6 +648,8 @@ def plesk_inventory(rows, account, domain, databases=None):
     home, root = site['home'].rstrip('/'), site['www_root'].rstrip('/')
     subscription_id = site['webspace_id'] or site['id']
     notes, children, wildcard = [], [], False
+    # Plesk DNS zones of the website, its aliases (also those for mail/DNS only) and the subdomains migrated with it.
+    zones = [{'id': site.get('dns_zone_id'), 'domain': domain, 'role': 'website'}]
     for child in sorted((row for row in domains if row['parent_id'] == site['id']), key=lambda row: row['name']):
         name = str(child['name']).lower()
         if child['htype'] != 'vrt_hst' or not child['www_root']:
@@ -664,15 +667,18 @@ def plesk_inventory(rows, account, domain, databases=None):
         elif child_root == root:
             children.append({'domain_id': 's%d' % child['id'], 'domain': name, 'type': 'subdomain', 'subdomain': 'none',
                              'redirect_type': '', 'redirect_path': '', 'active': 'y'})
+            zones.append({'id': child.get('dns_zone_id'), 'domain': name, 'role': 'subdomain'})
         elif child_root.startswith(root + '/') and all(FOLDER_PART.fullmatch(part) for part in child_root[len(root) + 1:].split('/')):
             children.append({'domain_id': 's%d' % child['id'], 'domain': name, 'type': 'vhostsubdomain', 'subdomain': 'www',
                              'web_folder': 'web/' + child_root[len(root) + 1:], 'php_version': plesk_php_version(child['php_handler']),
                              'redirect_type': '', 'redirect_path': '', 'active': 'y'})
+            zones.append({'id': child.get('dns_zone_id'), 'domain': name, 'role': 'subdomain'})
         else:
             notes.append('Subdomain %s has its own folder outside the document root; migrate it separately '
                          '(ispcp-migrate --from plesk %s CLIENT_ID)' % (name, name))
     for alias in sorted((row for row in grouped.get('alias', []) if row['dom_id'] == site['id']), key=lambda row: row['name']):
         name = str(alias['name']).lower()
+        zones.append({'id': alias.get('dns_zone_id'), 'domain': name, 'role': 'alias'})
         if alias['web'] != 'true':
             notes.append('Alias %s is not used for the website (mail/DNS only) and is not migrated' % name)
             continue
@@ -770,7 +776,7 @@ def plesk_inventory(rows, account, domain, databases=None):
                  'subscription': next(str(row['name']) for row in domains if row['id'] == subscription_id)},
         'databases': databases, 'children': children, 'cron': cron, 'notes': notes,
         'not_copied': [entry for entry in entries if entry != folder and entry not in PLESK_SYSTEM_ENTRIES and entry not in other_folders],
-        'servers': [],
+        'servers': [], 'dns_zones': [zone for zone in zones if zone['id']],
     }
 
 
@@ -839,8 +845,242 @@ def old_path_references(tree, old_root, limit=200):
     return found
 
 
+# --- DNS zones of a Plesk website ------------------------------------------------------------
+# Plesk's transfer ACL and secondary-zone rows are no zone data.
+PLESK_DNS_SKIP = frozenset(('AXFR', 'master', 'none'))
+# Longest record name ISPConfig accepts per type (legacy dns_a/dns_aaaa forms); others take 255.
+DNS_NAME_LIMIT = {'A': 64, 'AAAA': 64}
+
+
+def dns_record_name(host, origin, kind):
+    """The record name for the API: absolute like Plesk's, relative when that is too long for the type, or None."""
+    limit = DNS_NAME_LIMIT.get(kind, 255)
+    if len(host) + 1 <= limit:
+        return host + '.'
+    relative = host[:-len(origin) - 1] if host != origin else ''
+    return relative if relative and len(relative) <= limit else None
+
+
+# ISPConfig keeps SPF, DMARC and DKIM in TXT rows but accepts them only as those record types (the API refuses TXT
+# data containing these markers, like ISPConfig's forms); SPF and DMARC are composed from fields.
+SPF_ALL = {'-all': 'fail', '~all': 'softfail', '?all': 'neutral'}
+DMARC_POLICIES = ('none', 'quarantine', 'reject')
+
+
+def spf_fields(text):
+    """API fields of an SPF record that ISPConfig's SPF record can hold: pass mechanisms a, mx, ip4, ip6, a:HOST and
+    include:DOMAIN, ended by -all, ~all or ?all. None for anything else (ptr, exists, redirect=, +all, other qualifiers)."""
+    tokens = text.split()
+    if len(tokens) < 2 or tokens[0] != 'v=spf1':
+        return None
+    fields, lists, policy = {'allow_mx': False, 'allow_a': False}, {'ipv4_address': [], 'ipv6_address': [], 'hostname': [], 'include': []}, None
+    for token in tokens[1:]:
+        if policy is not None:
+            return None  # nothing may follow "all"
+        if token.lower() in SPF_ALL:
+            policy = SPF_ALL[token.lower()]
+            continue
+        bare = token[1:] if token.startswith('+') else token
+        kind, _, value = bare.partition(':')
+        kind = kind.lower()
+        if kind in ('mx', 'a') and not value:
+            fields['allow_' + kind] = True
+        elif kind in ('ip4', 'ip6') and value:
+            try:
+                network = ipaddress.ip_interface(value)
+            except ValueError:
+                return None
+            if network.version != (4 if kind == 'ip4' else 6):
+                return None
+            lists['ipv4_address' if kind == 'ip4' else 'ipv6_address'].append(value)
+        elif kind == 'a' and re.fullmatch(r'[a-zA-Z0-9.*-]{1,64}', value):
+            lists['hostname'].append(value)
+        elif kind == 'include' and re.fullmatch(r'[_a-zA-Z0-9.*-]{1,64}', value):
+            lists['include'].append(value)
+        else:
+            return None
+    if policy is None:
+        return None
+    fields.update({key: ' '.join(values) for key, values in lists.items() if values})
+    fields['policy'] = policy
+    return fields
+
+
+def spf_text(fields):
+    """The SPF text ISPConfig composes from the fields (DnsRecordMetaService::composeSpf)."""
+    tokens = (['mx'] if fields['allow_mx'] else []) + (['a'] if fields['allow_a'] else [])
+    for key, prefix in (('ipv4_address', 'ip4:'), ('ipv6_address', 'ip6:'), ('hostname', 'a:'), ('include', 'include:')):
+        tokens += [prefix + value for value in fields.get(key, '').split()]
+    return 'v=spf1 ' + ' '.join(tokens + [{'fail': '-', 'softfail': '~', 'neutral': '?'}[fields['policy']] + 'all'])
+
+
+def dmarc_fields(text):
+    """API fields of a DMARC record with only the tags ISPConfig's DMARC record holds (p, sp, rua, ruf, adkim, aspf, pct)."""
+    tags = [part.strip() for part in text.split(';')]
+    if tags[0].replace(' ', '') != 'v=DMARC1':
+        return None
+    found = {}
+    for tag in filter(None, tags[1:]):
+        name, equals, value = (part.strip() for part in tag.partition('='))
+        name = name.lower()
+        if not equals or name in found or name not in ('p', 'sp', 'rua', 'ruf', 'adkim', 'aspf', 'pct'):
+            return None
+        found[name] = value
+    fields = {'policy': found.pop('p', '').lower()}
+    if fields['policy'] not in DMARC_POLICIES:
+        return None
+    for name, value in found.items():
+        lower = value.lower()
+        if name == 'sp' and lower in DMARC_POLICIES or name in ('adkim', 'aspf') and lower in ('r', 's'):
+            fields[name] = lower
+        elif name == 'pct' and value.isdigit() and int(value) <= 100:
+            fields[name] = int(value)
+        elif name in ('rua', 'ruf') and all(re.fullmatch(r'mailto:[^\s,;!@]+@[a-zA-Z0-9.-]+', address.strip())
+                                              for address in value.split(',')):
+            fields[name] = ','.join(address.strip() for address in value.split(','))
+        else:
+            return None
+    return fields
+
+
+def dmarc_text(fields):
+    """The DMARC text ISPConfig composes from the fields (DnsRecordMetaService::composeDmarc)."""
+    tags = ['p=' + fields['policy']]
+    tags += ['%s=%s' % (name, fields[name]) for name in ('rua', 'ruf') if fields.get(name)]
+    tags += ['%s=%s' % (name, fields[name]) for name in ('adkim', 'aspf') if fields.get(name, 'r') != 'r']
+    tags += ['pct=%d' % fields['pct']] if fields.get('pct', 100) != 100 else []
+    tags += ['sp=' + fields['sp']] if fields.get('sp') else []
+    return 'v=DMARC1; ' + '; '.join(tags)
+
+
+def record_value(record):
+    """The value of a record body for messages, as in a zone file."""
+    kind = record['type']
+    if kind == 'SPF':
+        return spf_text(record)
+    if kind == 'DMARC':
+        return dmarc_text(record)
+    if kind == 'MX':
+        return '%d %s' % (record['priority'], record['hostname'])
+    if kind == 'SRV':
+        return '%d %d %d %s' % (record['priority'], record['weight'], record['port'], record['hostname'])
+    return record.get('data', '')
+
+
+def nova_zone(zone, records, *, plesk_addresses, ipv4, ipv6, nameservers):
+    """The new ISPConfig zone of one Plesk zone: everything is copied, except that the new DNS server's name servers
+    replace Plesk's (NS and SOA) and A/AAAA records with an address of the Plesk server get the new web server's.
+
+    zone/records are `plesk db` rows (settings in seconds, record ttl NULL = zone default). The result has the
+    zone body (created inactive), the record bodies, the remapped names, SPF/DMARC texts ISPConfig writes differently
+    (same meaning, its own order) and the records left for the operator.
+    """
+    origin = str(zone['name']).strip().lower().rstrip('.')
+
+    def host_of(row):
+        return str(row['host']).strip().lower().rstrip('.')
+
+    default_ttl = max(int(zone['ttl'] or 3600), 60)
+    plesk_ns = {str(row['val']).strip().lower().rstrip('.') for row in records if row['type'] == 'NS' and host_of(row) == origin}
+    created, remapped, rewritten, manual, dmarc, seen = [], [], [], [], [], set()
+
+    def add(record):
+        key = json.dumps(record, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            created.append(record)
+
+    for server in nameservers:
+        add({'type': 'NS', 'name': origin + '.', 'data': server + '.', 'ttl': default_ttl, 'active': True})
+    for row in sorted(records, key=lambda row: (host_of(row), str(row['type']), str(row['val']), row['id'])):
+        kind, host, value = str(row['type']), host_of(row), str(row['val']).strip()
+        option = str(row.get('opt') or '').strip()
+        shown = '%s %s %s' % (host, kind, value if len(value) <= 60 else value[:57] + '...')
+        if kind in PLESK_DNS_SKIP:
+            continue
+        if host != origin and not host.endswith('.' + origin):
+            manual.append(shown + ' (outside the zone)')
+            continue
+        name = dns_record_name(host, origin, kind)
+        if name is None:
+            manual.append(shown + ' (name too long for ISPConfig)')
+            continue
+        ttl = default_ttl if row.get('ttl') in (None, '') else max(int(row['ttl']), 60)
+        base = {'name': name, 'ttl': ttl, 'active': True}
+        target = value.lower().rstrip('.')
+        if kind == 'NS':
+            if host == origin:
+                continue  # the zone's own name servers: the new DNS server's, added above
+            # A subzone delegated to the Plesk name servers moves to the new DNS server too.
+            for server in nameservers if target in plesk_ns else [target]:
+                add(dict(base, type='NS', data=server + '.'))
+        elif kind in ('A', 'AAAA'):
+            address = ip_text(value)
+            if address is None or (':' in address) != (kind == 'AAAA'):
+                manual.append(shown + ' (not an %s address)' % ('IPv6' if kind == 'AAAA' else 'IPv4'))
+                continue
+            # The addresses of the Plesk name servers themselves stay (glue of ns.* in the provider's zone).
+            if address in plesk_addresses and host not in plesk_ns:
+                new = ipv6 if kind == 'AAAA' else ipv4
+                if new is None:
+                    manual.append(shown + ' (the new web server has no %s address)' % ('IPv6' if kind == 'AAAA' else 'IPv4'))
+                    continue
+                remapped.append({'name': host, 'type': kind, 'old': address, 'new': new})
+                address = new
+            add(dict(base, type=kind, data=address))
+        elif kind == 'CNAME' and target:
+            add(dict(base, type='CNAME', data=target + '.'))
+        elif kind == 'MX' and target and option.isdigit():
+            add(dict(base, type='MX', hostname=target + '.', priority=int(option)))
+        elif kind == 'SRV' and target and len(option.split()) == 3 and all(part.isdigit() for part in option.split()):
+            priority, weight, port = (int(part) for part in option.split())
+            add(dict(base, type='SRV', priority=priority, weight=weight, port=port, hostname=target + '.'))
+        elif kind == 'TXT' and value and not any(char in value for char in '"\\\r\n'):
+            if 'v=DKIM' in value:
+                add(dict(base, type='DKIM', data=value))  # stored verbatim
+            elif 'v=spf' in value or 'v=DMARC1; ' in value:
+                spf = 'v=spf' in value
+                fields = spf_fields(value) if spf else dmarc_fields(value) if host == '_dmarc.' + origin else None
+                if fields is None:
+                    manual.append(shown + (' (SPF that ISPConfig cannot hold as is)' if spf else
+                                           ' (DMARC that ISPConfig cannot hold as is)'))
+                    continue
+                text = spf_text(fields) if spf else dmarc_text(fields)
+                change = {'name': host, 'old': value, 'new': text} if text != value else None
+                if spf:
+                    add(dict(base, type='SPF', **fields))
+                    rewritten += [change] if change else []
+                else:
+                    dmarc.append((dict(base, type='DMARC', **fields), shown, change))
+            else:
+                add(dict(base, type='TXT', data=value))
+        else:
+            manual.append(shown + (' (%s records are not copied)' % kind if kind not in ('CNAME', 'MX', 'SRV', 'TXT')
+                                   else ' (value ISPConfig does not accept as is)'))
+    # ISPConfig creates a DMARC record only next to an active DKIM record and the domain's one SPF record (legacy
+    # dns_dmarc_edit.php), so it comes last, or is left to the operator when the zone cannot have it.
+    dkim = any(record['type'] == 'DKIM' and '._domainkey' in record['name'] or
+               record['type'] == 'CNAME' and '._domainkey' in record['name'] for record in created)
+    spf = sum(record['type'] == 'SPF' and record['name'] == origin + '.' for record in created)
+    for record, shown, change in dmarc:
+        if dkim and spf == 1:
+            add(record)
+            rewritten += [change] if change else []
+        else:
+            manual.append(shown + (' (ISPConfig accepts DMARC only in a zone with a DKIM record)' if not dkim else
+                                   ' (ISPConfig accepts DMARC only next to exactly one SPF record of the domain)'))
+    email = str(zone.get('email') or '').strip().lower()
+    mailbox = email if re.fullmatch(r'[a-z0-9_+-]+(?:\.[a-z0-9_+-]+)*@[a-z0-9-]+(?:\.[a-z0-9-]+)+', email) else 'hostmaster@' + origin
+    soa = {'origin': origin + '.', 'ns': nameservers[0] + '.', 'mbox': mailbox.replace('@', '.') + '.', 'ttl': default_ttl,
+           'refresh': max(int(zone['refresh']), 60), 'retry': max(int(zone['retry']), 60), 'expire': max(int(zone['expire']), 60),
+           'minimum': max(int(zone['minimum']), 60), 'active': False}
+    return {'origin': origin, 'soa': soa, 'records': created, 'remapped': remapped, 'rewritten': rewritten, 'manual': manual}
+
+
 class Migration:
     kind = 'ispconfig'
+    dns = True  # Plesk: recreate the website's DNS zones on the new DNS server (--no-dns: not)
+    key_active = False  # the client-bound key is switched on
 
     def __init__(self, config, state_dir, domain, client_id):
         self.config = config
@@ -853,6 +1093,7 @@ class Migration:
         self.local_web = transport == 'local'
         self.php_version = None  # --php VERSION of this migration
         self.databases = None  # --database NAME (Plesk): exactly these databases of the subscription
+        self.resolvers = [(address, 53) for address in DNS_RESOLVERS]
         self.directory = private_directory(state_dir)
         self.file = self.directory / 'state.json'
         self.domain = domain_name(domain)
@@ -952,19 +1193,55 @@ class Migration:
                 error_path=self.directory / 'server-check.log')
 
     def select_php(self):
-        """PHP of the new website: --php VERSION, the version chosen by an earlier run, or target.server_php_id."""
+        """PHP of the new website: --php VERSION, the version chosen by an earlier run, the Plesk website's own version,
+        or target.server_php_id. A Plesk subdomain with its own folder keeps its own version (--php sets all)."""
         site = self.state['objects'].get('site', {}).get('record')
+        rows = None
+        if self.kind == 'plesk' and site is None:
+            inventory = self.state['inventory']
+            if not self.php_version and 'php' not in self.state and inventory['site'].get('php_version'):
+                # The same PHP as on Plesk, e.g. alt-php74-fpm -> 7.4.
+                rows = self.admin.all('/servers/%d/php-versions' % self.target['web_server_id'])
+                version = inventory['site']['php_version']
+                try:
+                    php_id = php_configuration(rows, version, self.client_id)
+                except MigrationError as exc:
+                    raise MigrationError('The Plesk website runs PHP %s (%s), which the new web server does not offer: %s. Choose '
+                                         'another version with --php VERSION.' % (version, inventory['site']['php_handler'], exc)) from None
+                self.state['php'] = {'version': version, 'server_php_id': php_id, 'source': 'plesk'}
         if self.php_version:
-            rows = self.admin.all('/servers/%d/php-versions' % self.target['web_server_id'])
+            rows = rows or self.admin.all('/servers/%d/php-versions' % self.target['web_server_id'])
             chosen = {'version': self.php_version, 'server_php_id': php_configuration(rows, self.php_version, self.client_id)}
             if site is not None:
                 require(int(site.get('server_php_id') or 0) == chosen['server_php_id'],
                         'The website was already created with PHP configuration ID %s; change its PHP version in '
                         'ISPConfig or WHMCS, then repeat the command without --php.' % site.get('server_php_id'))
             self.state['php'] = chosen
+        if self.kind == 'plesk' and site is None:
+            self.state['php_children'] = self.child_php(rows)
         if site is not None:
             return {'version': self.state.get('php', {}).get('version'), 'server_php_id': int(site.get('server_php_id') or 0)}
         return self.state.get('php', {'version': None, 'server_php_id': self.target.get('server_php_id', 0)})
+
+    def child_php(self, rows=None):
+        """PHP of the Plesk subdomains with their own folder whose Plesk version differs from the website's.
+
+        Without --php each keeps its Plesk version; one the new web server does not offer gets the website's PHP
+        (server_php_id None, listed in the plan).
+        """
+        website = (self.state.get('php') or {}).get('version')
+        result = {}
+        for child in self.state['inventory']['children']:
+            version = child.get('php_version')
+            if self.php_version or child['type'] != 'vhostsubdomain' or not version or version == website:
+                continue
+            rows = rows or self.admin.all('/servers/%d/php-versions' % self.target['web_server_id'])
+            try:
+                php_id = php_configuration(rows, version, self.client_id)
+            except MigrationError:
+                php_id = None
+            result[str(child['domain_id'])] = {'version': version, 'server_php_id': php_id}
+        return result
 
     def usage_summary(self):
         return self.admin.get('/usage/summary?client_id=' + str(self.client_id))
@@ -985,7 +1262,18 @@ class Migration:
         if self.state.get('cron_jobs'):
             counts['cron_jobs'] = sum(job['create'] and 'cron:%d' % index not in objects
                                       for index, job in enumerate(self.state['cron_jobs']))
+        counts.update(self.dns_counts())
         return counts
+
+    def dns_counts(self):
+        """DNS zones and records this migration still has to create."""
+        plan = self.state.get('dns') if self.dns else None
+        if not plan or plan.get('done'):
+            return {}
+        objects = self.state['objects']
+        return {'dns_zones': sum('zone:' + zone['origin'] not in objects for zone in plan['zones']),
+                'dns_records': sum('rr:%s:%d' % (zone['origin'], index) not in objects and index not in zone.get('rejected', [])
+                                   for zone in plan['zones'] for index in range(len(zone['records'])))}
 
     def allocation(self, summary):
         """Quotas of the migrated objects, checked against the measured source sizes.
@@ -1145,6 +1433,8 @@ class Migration:
         self.state['source_size'] = self.measure_source(inventory)
         php = self.select_php()
         self.state['cron_jobs'] = self.cron_plan(inventory, client, php) if self.kind == 'plesk' else []
+        if self.kind == 'plesk' and self.dns:
+            self.prepare_dns()
         self.preflight()
         staging, free = self.check_free_space()
         quotas, sizes = self.state['quotas'], self.state['source_size']
@@ -1164,7 +1454,9 @@ class Migration:
                          'configuration ID %d' % php['server_php_id'] if php['server_php_id'] else 'server default'))
         if self.kind == 'plesk':
             hint = '' if php['version'] == site['php_version'] or not site['php_version'] else '; keep it with --php ' + site['php_version']
-            print('Source PHP: %s (%s)%s' % (site['php_version'] or 'unknown', site['php_handler'], hint))
+            print('Source PHP: %s (%s)%s' % (site['php_version'] or 'unknown', site['php_handler'],
+                                             '; the same on the new website' if site['php_version'] and php['version'] == site['php_version']
+                                             else hint))
         print('Destination web access: ' + ('local (no SSH)' if self.local_web else 'SSH'))
         print('Website disk quota: %s (source files %d MB)' % (mb(quotas['disk_mb']), -(-sizes['web_bytes'] // MB)))
         print('Website traffic quota: ' + mb(quotas['traffic_mb']))
@@ -1192,9 +1484,18 @@ class Migration:
             print('Aliases: ' + ', '.join(child['domain'] + (' (301 to %s)' % self.domain if child['redirect_type'] else '')
                                           + ('' if child['active'] == 'y' else ' (inactive)') for child in aliases))
         subdomains = [child for child in inventory['children'] if child['type'] != 'alias']
+        php = self.state.get('php_children', {})
+
+        def folder(child):
+            own = php.get(str(child['domain_id']))
+            if own is None:
+                return ' (%s)' % child['web_folder']
+            if own['server_php_id'] is None:
+                return " (%s; PHP %s of Plesk is not on the new web server: the website's PHP)" % (child['web_folder'], own['version'])
+            return ' (%s, PHP %s)' % (child['web_folder'], own['version'])
         if subdomains:
-            print('Subdomains: ' + ', '.join(child['domain'] + (' (%s)' % child['web_folder'] if child['type'] == 'vhostsubdomain'
-                                                                else ' (same folder)') for child in subdomains))
+            print('Subdomains: ' + ', '.join(child['domain'] + (folder(child) if child['type'] == 'vhostsubdomain' else ' (same folder)')
+                                             for child in subdomains))
         jobs = self.state['cron_jobs']
         if jobs:
             print('Cron jobs (%d created INACTIVE: enable them after the DNS switch):' % sum(job['create'] for job in jobs))
@@ -1209,16 +1510,215 @@ class Migration:
             print('Not copied from the Plesk webspace (outside the document root): ' + ', '.join(inventory['not_copied']))
         for note in inventory['notes']:
             print('Note: ' + note)
-        print('WHMCS product/Create, mail, DNS and certificates remain operator steps; PHP settings of the Plesk domain are not copied.')
+        if self.dns:
+            self.print_dns_plan(self.state['dns'], when='when the copy is complete')
+        else:
+            print('DNS zones: not created (--no-dns)')
+        print('WHMCS product/Create, mail, the DNS switch and certificates remain operator steps; '
+              'PHP settings of the Plesk domain are not copied.')
 
-    def create(self, name, endpoint, payload):
+    # --- DNS zones (Plesk) ----------------------------------------------------------------------
+    def hosting_addresses(self):
+        """The client's DNS server with its name servers and the new web server's addresses (GET /me/hosting-addresses)."""
+        result = self.admin.get('/me/hosting-addresses?client_id=%d' % self.client_id)
+        dns = [row for row in result.get('dns') or [] if row.get('is_default')]
+        require(dns and dns[0].get('nameservers'),
+                'The client has no DNS server in the new ISPConfig, so the website\'s DNS zones cannot be created there. '
+                'Assign a DNS server to the client, or migrate without the DNS zones (--no-dns).')
+        web = [row for row in result.get('web') or [] if row.get('server_id') == self.target['web_server_id']]
+        require(web, 'The new web server (server ID %d) is not a web server of this client' % self.target['web_server_id'])
+        servers = [{'name': str(row['name']).strip().lower().rstrip('.'), 'ipv4': list(row.get('ipv4') or [])}
+                   for row in dns[0]['nameservers']]
+        return {'server_id': int(dns[0]['server_id']), 'nameservers': servers,
+                'ipv4': (web[0].get('ipv4') or [None])[0], 'ipv6': (web[0].get('ipv6') or [None])[0]}
+
+    def dns_plan(self, rows=None, lookup=None):
+        """Read-only: the website's Plesk zones that public DNS really delegates to Plesk, as zones of the new DNS server.
+
+        rows: `plesk db` rows of the zones (read on the Plesk server when None);
+        lookup: zone name -> (its name servers in public DNS, error).
+        """
+        inventory = self.state.get('inventory') or {}
+        if 'dns_zones' not in inventory:
+            inventory = self.source_inventory()  # migration state written before the DNS zones were planned
+        zones = inventory['dns_zones']
+        if rows is None:
+            rows = json.loads(self.plesk({'action': 'dns', 'zones': [zone['id'] for zone in zones]},
+                                         log='plesk-dns.log'))['rows'] if zones else []
+        lookup = lookup or (lambda name: public_nameservers(name, self.resolvers))
+        grouped = plesk_rows(rows)
+        found = {row['id']: row for row in grouped.get('zone', [])}
+        records = {}
+        for row in grouped.get('record', []):
+            records.setdefault(row['zone_id'], []).append(row)
+        addresses = {ip_text(row['address']) for row in grouped.get('ip', [])} - {None}
+        hosting = self.hosting_addresses()
+        names = [server['name'] for server in hosting['nameservers']]
+        plan = dict(hosting, zones=[], skipped=[])
+        for entry in zones:
+            zone = found.get(entry['id'])
+            if zone is None:
+                plan['skipped'].append('%s: no DNS zone in Plesk' % entry['domain'])
+                continue
+            origin = str(zone['name']).strip().lower().rstrip('.')
+            if zone['type'] != 'master' or zone['status'] != 0:
+                plan['skipped'].append('%s: %s in Plesk' % (origin, 'DNS is switched off' if zone['type'] == 'master' else 'secondary zone'))
+                continue
+            own = {str(row['val']).strip().lower().rstrip('.') for row in records.get(zone['id'], [])
+                   if row['type'] == 'NS' and str(row['host']).strip().lower().rstrip('.') == origin}
+            public, error = lookup(origin)
+            if not own & set(public):
+                plan['skipped'].append('%s: public DNS does not use the Plesk name servers (%s)' % (origin, ', '.join(public) or error))
+                continue
+            existing = [row for row in self.admin.all('/dns/soa', origin=origin + '.') if str(row.get('origin', '')).lower() == origin + '.']
+            mine = self.state['objects'].get('zone:' + origin, {}).get('record', {}).get('id')
+            if existing and existing[0]['id'] != mine:
+                plan['skipped'].append('%s: the zone already exists in the new ISPConfig (zone ID %s) and is left unchanged'
+                                       % (origin, existing[0]['id']))
+                continue
+            copy = nova_zone(zone, records.get(zone['id'], []), plesk_addresses=addresses, ipv4=hosting['ipv4'],
+                             ipv6=hosting['ipv6'], nameservers=names)
+            copy['soa']['server_id'] = hosting['server_id']
+            plan['zones'].append(copy)
+        return plan
+
+    def prepare_dns(self, **source):
+        """The DNS plan of this migration: kept once a zone was created, otherwise read again (Plesk may have changed)."""
+        plan = self.state.get('dns')
+        objects = self.state['objects']
+        if plan and (plan.get('done') or any('zone:' + zone['origin'] in objects for zone in plan['zones'])):
+            return plan
+        self.state['dns'] = self.dns_plan(**source)
+        self.save()
+        return self.state['dns']
+
+    def print_dns_plan(self, plan, *, when):
+        if plan.get('done'):
+            print('DNS zones: created in the new ISPConfig: ' + ', '.join(zone['origin'] for zone in plan['zones']))
+            return
+        servers = ', '.join(server['name'] for server in plan['nameservers'])
+        if plan['zones']:
+            print('DNS zones (created %s; name servers %s):' % (when, servers))
+        for zone in plan['zones']:
+            changes = sorted({'%s -> %s' % (item['old'], item['new']) for item in zone['remapped']})
+            names = sorted({item['name'] for item in zone['remapped']})
+            print('  %s: %d records%s' % (zone['origin'], len(zone['records']), '; A/AAAA of the Plesk server (%s) become the new '
+                                          'web server\'s for: %s' % (', '.join(changes), ', '.join(names)) if names else ''))
+            for item in zone.get('rewritten', []):
+                print('  %s: ISPConfig writes "%s" as "%s"' % (item['name'], item['old'], item['new']))
+            for record in zone['manual']:
+                print('  MANUAL %s' % record)
+        for note in plan['skipped']:
+            print('DNS zone not created: ' + note)
+        if plan['zones']:
+            print('DNS switch: once the website and the zones are checked, change the domains\' name servers at the registrar to %s.'
+                  % servers)
+        else:
+            print('DNS zones: none to create')
+
+    def create_dns(self, plan):
+        """Create the planned zones with the client's key: each one inactive, then its records, then switched on.
+
+        ISPConfig's DNS server rewrites and checks an active zone after every journal entry; a zone switched on
+        only when it is complete is loaded once, with all its records.
+        """
+        if plan.get('done') or not plan['zones']:
+            return
+        self.use_client_key()
+        for zone in plan['zones']:
+            name = 'zone:' + zone['origin']
+            record = self.create(name, '/dns/soa', zone['soa'], wait=False)
+            require(str(record['origin']).lower() == zone['soa']['origin'], 'DNS zone identity changed')
+            rejected = zone.setdefault('rejected', [])
+            for index, rr in enumerate(zone['records']):
+                if index in rejected:
+                    continue
+                try:
+                    created = self.create('rr:%s:%d' % (zone['origin'], index), '/dns/records', dict(rr, zone=record['id']), wait=False)
+                except ApiError as exc:
+                    if exc.status != 422:
+                        raise
+                    # Data ISPConfig refuses (e.g. other data next to a CNAME) must not keep the rest of the zone off.
+                    rejected.append(index)
+                    value = record_value(rr)
+                    value = value if len(value) <= 60 else value[:57] + '...'
+                    zone['manual'].append('%s %s %s (rejected by the new ISPConfig: %s)' % (rr['name'], rr['type'], value, exc))
+                    self.save()
+                    continue
+                require(int(created['zone']) == int(record['id']), 'DNS record identity changed')
+            entry = self.state['objects'][name]
+            if 'activated' not in entry:
+                _, change = self.api.request('PUT', '/dns/soa/%d' % record['id'], {'active': True})
+                entry['activated'] = change
+                self.save()
+            self.api.wait(entry['activated'])
+            print('DNS zone created: %s (zone ID %d, %d records)' % (zone['origin'], record['id'], len(zone['records']) - len(rejected)),
+                  flush=True)
+            for line in zone['manual']:
+                print('  MANUAL %s' % line)
+        plan['done'] = True
+        self.save()
+        self.verify_dns(plan)
+
+    def verify_dns(self, plan, attempts=12):
+        """Ask the new DNS server itself whether it answers for every created zone."""
+        address = next(((server['name'], value) for server in plan['nameservers'] for value in server['ipv4']), None)
+        if address is None:
+            return
+        expected = {server['name'] for server in plan['nameservers']}
+        for zone in plan['zones']:
+            for attempt in range(attempts):
+                if zone_served(address[1], zone['origin'], expected):
+                    print('DNS: %s (%s) answers for %s' % (address[0], address[1], zone['origin']))
+                    break
+                time.sleep(5)
+            else:
+                print('WARNING: %s (%s) does not answer for %s with its name servers yet; check the zone in ISPConfig '
+                      'before the DNS switch.' % (address[0], address[1], zone['origin']))
+
+    def dns_after_copy(self):
+        """Plesk: the website's DNS zones once its copy is complete (nothing changes for visitors before the DNS switch)."""
+        if self.kind != 'plesk' or not self.dns:
+            return
+        try:
+            plan = self.prepare_dns()
+            if not plan.get('done'):
+                self.print_dns_plan(plan, when='now')
+                check_counts(self.usage_summary(), self.dns_counts())
+                self.create_dns(plan)
+        except MigrationError as exc:
+            raise MigrationError('The website copy is complete, but its DNS zones were not created: %s Fix the cause, then '
+                                 'repeat the command with --dns.' % exc) from None
+        finally:
+            self.release_client_key()
+
+    def dns_only(self, *, plan_only=False, interactive=False):
+        """--dns: only the website's DNS zones, e.g. for a website copied before the migration created them."""
+        require(self.kind == 'plesk', '--dns creates the DNS zones of a Plesk website (--from plesk)')
+        try:
+            plan = self.prepare_dns()
+            print('DNS: %s → ISPConfig client %s' % (self.domain, self.client_id))
+            self.print_dns_plan(plan, when='now' if not plan_only else 'by --dns without --plan')
+            if plan_only or plan.get('done') or not plan['zones']:
+                return
+            check_counts(self.usage_summary(), self.dns_counts())
+            if interactive:
+                confirm('Create these DNS zones in the new ISPConfig? Public DNS keeps using Plesk until the switch.')
+            self.create_dns(plan)
+        finally:
+            self.release_client_key()
+
+    def create(self, name, endpoint, payload, *, wait=True):
+        """POST once per state entry. wait=False leaves waiting for ISPConfig to a later change (DNS records:
+        ISPConfig applies changes in order, so waiting for the zone's activation covers its records)."""
         objects = self.state['objects']
         if name in objects:
             entry = objects[name]
             require('record' in entry, 'Uncertain previous POST for %s. Reconcile the API receipt in state.json before retrying; never delete state blindly.' % name)
             current = self.api.get(endpoint + '/' + str(entry['record']['id']))
             require(current['id'] == entry['record']['id'], 'Provisioned object changed')
-            self.api.wait(entry.get('change'))
+            if wait:
+                self.api.wait(entry.get('change'))
             return current
         objects[name] = {'endpoint': endpoint, 'pending': True}
         self.save()  # A lost HTTP response must never result in a duplicate POST.
@@ -1231,12 +1731,16 @@ class Migration:
             raise
         objects[name] = {'endpoint': endpoint, 'record': record, 'change': change}
         self.save()  # Persist receipt before waiting for asynchronous ISPConfig provisioning.
-        self.api.wait(change)
+        if wait:
+            self.api.wait(change)
         return record
 
-    def provision(self):
-        # Use the customer's own permissions and quotas, just like the WHMCS
-        # client area. Admin authentication is limited to account/key management.
+    def use_client_key(self):
+        """Act with the customer's own permissions and quotas, just like the WHMCS client area.
+
+        Admin authentication is limited to account/key management and reads. The key is switched off again
+        by release_client_key() or at the end of run().
+        """
         if 'client_key' not in self.state:
             self.state['client_key'] = {'pending': True, 'name': 'migration-' + self.state['nonce']}
             self.save()
@@ -1248,7 +1752,17 @@ class Migration:
         key = self.state['client_key']
         require('key' in key, 'Uncertain migration-key creation; find and revoke migration-' + self.state['nonce'] + ' before clearing only client_key in state.json')
         self.admin.request('PUT', '/system/api-keys/' + str(key['id']), {'active': True})
+        self.key_active = True
         self.api = Api(self.target['api_url'], key=key['key'])
+
+    def release_client_key(self):
+        if self.key_active:
+            self.admin.request('PUT', '/system/api-keys/' + str(self.state['client_key']['id']), {'active': False})
+            self.key_active = False
+        self.api = self.admin
+
+    def provision(self):
+        self.use_client_key()
         # Refresh immediately before creating a new website. The API still
         # enforces the client/reseller caps if allocations change concurrently.
         quotas = self.refresh_allocation()
@@ -1279,8 +1793,9 @@ class Migration:
                 payload = {'domain': name, 'type': 'vhostsubdomain', 'parent_domain_id': site['id'], 'web_folder': child['web_folder'],
                            'php': 'php-fpm', 'active': True, 'subdomain': child['subdomain'], 'ssl': False,
                            'ssl_letsencrypt': False, 'rewrite_to_https': False}
-                if php_id:
-                    payload['server_php_id'] = php_id
+                own = self.state.get('php_children', {}).get(str(child['domain_id']), {}).get('server_php_id')
+                if own or php_id:
+                    payload['server_php_id'] = own or php_id
                 record = self.create('child:' + str(child['domain_id']), '/sites/web-domains', payload)
                 require(record['parent_domain_id'] == site['id'] and record['domain'] == name and record['web_folder'] == child['web_folder']
                         and record['document_root'] == site['document_root'], 'Target subdomain identity changed')
@@ -1526,6 +2041,7 @@ class Migration:
         created = sum(job['create'] for job in self.state.get('cron_jobs', []))
         if created:
             print('%d cron job(s) were created INACTIVE; enable them after the DNS switch and stop them on the old server.' % created)
+        self.dns_after_copy()
 
     def run(self, *, sync=False, source_quiesced=False, target_quiesced=False, plan_ready=False):
         try:
@@ -1567,7 +2083,7 @@ class Migration:
 # Public DNS decides, not /etc/hosts or a server's own authoritative copy of a zone, so the
 # hostnames are asked directly from recursive resolvers (public ones unless --resolver is given).
 DNS_RESOLVERS = ('1.1.1.1', '8.8.8.8')
-DNS_A, DNS_AAAA, DNS_CNAME = 1, 28, 5
+DNS_A, DNS_AAAA, DNS_CNAME, DNS_NS = 1, 28, 5, 2
 DNS_RCODES = {1: 'FORMERR', 2: 'SERVFAIL', 3: 'NXDOMAIN', 4: 'NOTIMP', 5: 'REFUSED'}
 # Website status, strongest first: one hostname on the old server keeps the website "old".
 SITE_STATES = ('old', 'new', 'other', 'none')
@@ -1635,7 +2151,7 @@ def dns_parse(message, ident, question):
             records.append((owner, rtype, str(ipaddress.IPv4Address(data))))
         elif rclass == 1 and rtype == DNS_AAAA and length == 16:
             records.append((owner, rtype, ipaddress.IPv6Address(data).compressed))
-        elif rclass == 1 and rtype == DNS_CNAME:
+        elif rclass == 1 and rtype in (DNS_CNAME, DNS_NS):
             records.append((owner, rtype, dns_read_name(message, offset)[0]))
         offset += length
     return bool(flags & 0x0200), flags & 0x000F, records
@@ -1731,6 +2247,28 @@ def resolve(name, resolvers, timeout=3.0):
             current = target  # only the CNAME came back: ask for its target
     error = None if addresses else 'NXDOMAIN' if nxdomain else failures[0] if failures else 'no address'
     return {'addresses': addresses, 'cname': chain, 'error': error}
+
+
+def public_nameservers(name, resolvers, timeout=3.0):
+    """Name servers of a zone in public DNS (lowercase, without the dot) and why there are none."""
+    try:
+        name = ascii_hostname(name)
+        rcode, records = dns_ask(resolvers, name, DNS_NS, timeout)
+    except DnsError as exc:
+        return [], str(exc)
+    if rcode == 3:
+        return [], 'NXDOMAIN'
+    found = sorted({value for owner, rtype, value in records if rtype == DNS_NS and owner == name})
+    return found, None if found else 'no NS records'
+
+
+def zone_served(address, origin, nameservers, timeout=3.0):
+    """True when the DNS server at address answers for the zone with exactly these name servers."""
+    try:
+        rcode, records = dns_query((address, 53), ascii_hostname(origin), DNS_NS, timeout)
+    except DnsError:
+        return False
+    return rcode == 0 and {value for owner, rtype, value in records if rtype == DNS_NS and owner == origin} == set(nameservers)
 
 
 def ip_text(value):
@@ -2020,17 +2558,22 @@ def parse_args(argv=None):
         parser.add_argument('--php', metavar='VERSION', help='PHP version of the new website, e.g. 5.6 (default: target.server_php_id)')
         parser.add_argument('--database', action='append', metavar='NAME',
                             help='Plesk: migrate exactly this database of the subscription (repeatable; default: those of the domain)')
+        parser.add_argument('--dns', action='store_true',
+                            help='Plesk: only create the DNS zones of the website, e.g. one copied earlier (with --plan: show them)')
+        parser.add_argument('--no-dns', action='store_true', help='Plesk: do not create the DNS zones of the website')
         parser.set_defaults(command='interactive', source_quiesced=False, target_quiesced=False, config_reviewed=False)
         args = parser.parse_args(argv[1:])
         try:
             args.domain = domain_name(args.domain)
             require(args.client_id > 0, 'client ID must be positive')
             require(args.php is None or re.fullmatch(r'[0-9]+\.[0-9]+', args.php), '--php takes a version such as 5.6 or 8.3')
+            require(not (args.dns and args.no_dns), '--dns and --no-dns exclude each other')
+            require(not args.dns or args.command in ('interactive', 'plan'), '--dns goes alone or with --plan')
         except (MigrationError, ValueError) as exc:
             parser.error(str(exc))
         return args
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['plan', 'run', 'sync', 'publish', 'status'])
+    parser.add_argument('command', choices=['plan', 'run', 'sync', 'publish', 'status', 'dns'])
     parser.add_argument('--config', required=True, help='Connection settings JSON (see config.example.json)')
     parser.add_argument('--domain', required=True)
     parser.add_argument('--client-id', required=True, type=int, help='Existing NEW ISPConfig client ID')
@@ -2041,6 +2584,7 @@ def parse_args(argv=None):
     parser.add_argument('--php', metavar='VERSION', help='With plan/run: PHP version of the new website, e.g. 5.6')
     parser.add_argument('--database', action='append', metavar='NAME', help='Plesk: migrate exactly this database (repeatable)')
     parser.add_argument('--from', dest='source_name', metavar='NAME', help='Old server from "sources" in the configuration, e.g. plesk')
+    parser.add_argument('--no-dns', action='store_true', help='Plesk: do not create the DNS zones of the website')
     return parser.parse_args(argv)
 
 
@@ -2072,10 +2616,19 @@ def main(argv=None):
             migration = Migration(config, state_dir, args.domain, args.client_id)
             migration.php_version = args.php
             migration.databases = args.database
-            if args.command == 'plan':
+            migration.dns = not args.no_dns
+            if getattr(args, 'dns', False):
+                migration.dns_only(plan_only=args.command == 'plan', interactive=True)
+            elif args.command == 'dns':
+                migration.dns_only()
+            elif args.command == 'plan':
                 migration.plan()
             elif args.command == 'status':
                 print('Domain: %s; phase: %s; round: %s' % (migration.domain, migration.state['phase'], migration.state['round']))
+                dns = migration.state.get('dns')
+                if dns:
+                    print('DNS zones: %s %s' % ('created' if dns.get('done') else 'planned',
+                                                ', '.join(zone['origin'] for zone in dns['zones']) or '(none)'))
             elif args.command == 'publish':
                 migration.publish(config_reviewed=args.config_reviewed)
             elif args.command in ('interactive', 'interactive_sync'):

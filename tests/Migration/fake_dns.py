@@ -1,6 +1,6 @@
 """Small recursive-resolver stand-in for tests: UDP and TCP on 127.0.0.1, one port.
 
-records: {name: [('A'|'AAAA'|'CNAME', value)]}; a name that is missing answers NXDOMAIN.
+records: {name: [('A'|'AAAA'|'CNAME'|'NS', value)]}; a name that is missing answers NXDOMAIN.
 cname_only: names whose CNAME is answered without chasing it (the client asks again).
 truncate: names whose UDP answer only sets TC, so the client repeats the query over TCP.
 """
@@ -9,7 +9,7 @@ import socket
 import struct
 import threading
 
-TYPES = {'A': 1, 'AAAA': 28, 'CNAME': 5}
+TYPES = {'A': 1, 'AAAA': 28, 'CNAME': 5, 'NS': 2}
 
 
 def wire(name):
@@ -57,7 +57,7 @@ class FakeDns:
             if not cname:
                 for kind, value in self.records[owner]:
                     if TYPES[kind] == qtype:
-                        data = ipaddress.ip_address(value).packed
+                        data = wire(value) if kind == 'NS' else ipaddress.ip_address(value).packed
                         answers.append(wire(owner) + struct.pack('!HHIH', qtype, 1, 60, len(data)) + data)
                 break
             # Owner of the query name is compressed to the question (offset 12).

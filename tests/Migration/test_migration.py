@@ -551,8 +551,9 @@ class SiteInventoryTests(unittest.TestCase):
 
 
 def plesk_domain(id, name, *, webspace=0, parent=0, root=None, home='/var/www/vhosts/shop.test', htype='vrt_hst', status=0,
-                 login='shopuser', handler='alt-php81-fpm', client='shop'):
+                 login='shopuser', handler='alt-php81-fpm', client='shop', zone=None):
     return {'t': 'domain', 'id': id, 'name': name, 'htype': htype, 'status': status, 'webspace_id': webspace, 'parent_id': parent,
+            'dns_zone_id': zone,
             'www_root': root if htype == 'vrt_hst' else None, 'login': login if htype == 'vrt_hst' else None,
             'home': home if htype == 'vrt_hst' else None, 'shell': '/usr/local/psa/bin/chrootsh', 'php_handler': handler,
             'client': client, 'company': 'Shop s.r.o.', 'contact': 'Jana'}
@@ -560,19 +561,19 @@ def plesk_domain(id, name, *, webspace=0, parent=0, root=None, home='/var/www/vh
 
 HOME = '/var/www/vhosts/shop.test'
 PLESK_ROWS = [
-    plesk_domain(1, 'shop.test', root=HOME + '/httpdocs'),
+    plesk_domain(1, 'shop.test', root=HOME + '/httpdocs', zone=31),
     plesk_domain(2, '_.shop.test', webspace=1, parent=1, root=HOME + '/httpdocs'),
-    plesk_domain(3, 'blog.shop.test', webspace=1, parent=1, root=HOME + '/httpdocs/blog', handler='alt-php74-fpm'),
+    plesk_domain(3, 'blog.shop.test', webspace=1, parent=1, root=HOME + '/httpdocs/blog', handler='alt-php74-fpm', zone=35),
     plesk_domain(4, 'same.shop.test', webspace=1, parent=1, root=HOME + '/httpdocs'),
-    plesk_domain(5, 'own.shop.test', webspace=1, parent=1, root=HOME + '/own.shop.test'),
+    plesk_domain(5, 'own.shop.test', webspace=1, parent=1, root=HOME + '/own.shop.test', zone=36),
     plesk_domain(6, 'go.shop.test', webspace=1, parent=1, htype='std_fwd'),
     plesk_domain(7, 'addon.test', webspace=1, root=HOME + '/addon.test'),
     plesk_domain(8, 'off.test', root='/var/www/vhosts/off.test/httpdocs', home='/var/www/vhosts/off.test', status=16, login='off'),
     plesk_domain(9, 'mail.test', htype='none'),
     plesk_domain(10, 'nested.test', root='/var/www/vhosts/nested.test/httpdocs/public', home='/var/www/vhosts/nested.test', login='n'),
-    {'t': 'alias', 'id': 1, 'dom_id': 1, 'name': 'shop.example', 'status': 0, 'web': 'true', 'seo_redirect': 'true'},
-    {'t': 'alias', 'id': 2, 'dom_id': 1, 'name': 'shop.other', 'status': 0, 'web': 'true', 'seo_redirect': 'false'},
-    {'t': 'alias', 'id': 3, 'dom_id': 1, 'name': 'mail-only.test', 'status': 0, 'web': 'false', 'seo_redirect': 'false'},
+    {'t': 'alias', 'id': 1, 'dom_id': 1, 'name': 'shop.example', 'status': 0, 'web': 'true', 'seo_redirect': 'true', 'dns_zone_id': 32},
+    {'t': 'alias', 'id': 2, 'dom_id': 1, 'name': 'shop.other', 'status': 0, 'web': 'true', 'seo_redirect': 'false', 'dns_zone_id': None},
+    {'t': 'alias', 'id': 3, 'dom_id': 1, 'name': 'mail-only.test', 'status': 0, 'web': 'false', 'seo_redirect': 'false', 'dns_zone_id': 34},
     {'t': 'database', 'id': 11, 'name': 'shop_wp', 'type': 'mysql', 'dom_id': 1, 'server_id': 1, 'default_user_id': None},
     {'t': 'database', 'id': 12, 'name': 'shop-old_db', 'type': 'mysql', 'dom_id': 1, 'server_id': 1, 'default_user_id': 22},
     {'t': 'database', 'id': 13, 'name': 'addon_wp', 'type': 'mysql', 'dom_id': 1, 'server_id': 1, 'default_user_id': None},
@@ -656,6 +657,35 @@ class PleskTests(unittest.TestCase):
                                 ('missing.test', 'not on the Plesk server')):
             with self.subTest(domain=domain), self.assertRaisesRegex(m.MigrationError, message):
                 m.plesk_site(PLESK_ROWS, domain)
+
+    def test_plesk_php_versions_carry_over_to_the_website_and_its_subdomains(self):
+        migration = object.__new__(m.Migration)
+        migration.kind, migration.client_id, migration.php_version = 'plesk', 6, None
+        migration.target = {'web_server_id': 4, 'server_php_id': 0}
+        rows = [{'id': 11, 'name': 'PHP 7.4', 'active': 'y', 'php_fpm_ini_dir': '/etc/php/7.4/fpm', 'client_id': 0},
+                {'id': 12, 'name': 'PHP 8.1', 'active': 'y', 'php_fpm_ini_dir': '/etc/php/8.1/fpm', 'client_id': 0}]
+        migration.admin = MagicMock()
+        migration.admin.all.return_value = rows
+        migration.state = {'objects': {}, 'inventory': self.inventory()}  # alt-php81-fpm, blog.shop.test alt-php74-fpm
+        self.assertEqual({'version': '8.1', 'server_php_id': 12, 'source': 'plesk'}, migration.select_php())
+        self.assertEqual({'s3': {'version': '7.4', 'server_php_id': 11}}, migration.state['php_children'])
+        # A subdomain version the new web server lacks gets the website's PHP.
+        migration.admin.all.return_value = rows[1:]
+        del migration.state['php']
+        migration.select_php()
+        self.assertEqual({'s3': {'version': '7.4', 'server_php_id': None}}, migration.state['php_children'])
+        # --php sets the website and its subdomains.
+        migration.php_version = '7.4'
+        migration.admin.all.return_value = rows
+        self.assertEqual({'version': '7.4', 'server_php_id': 11}, migration.select_php())
+        self.assertEqual({}, migration.state['php_children'])
+        # The website's version missing on the new web server stops the plan.
+        migration.php_version = None
+        del migration.state['php']
+        migration.admin.all.return_value = rows[:1]
+        with self.assertRaisesRegex(m.MigrationError, r'The Plesk website runs PHP 8.1 \(alt-php81-fpm\), which the new web server '
+                                                      r'does not offer: .*available: PHP 7.4.*--php VERSION'):
+            migration.select_php()
 
     def test_cron_jobs_map_webspace_paths_and_list_the_rest_for_review(self):
         jobs = {job['source']: job for job in self.inventory()['cron']}
@@ -772,6 +802,213 @@ class PleskTests(unittest.TestCase):
             (Path(tree) / 'web/logs').symlink_to(HOME + '/logs')
             with self.assertRaisesRegex(m.MigrationError, 'External absolute symlink'):
                 m.normalize_links(tree, [(HOME + '/httpdocs', 'web')])
+
+
+def zone_row(id, name, **values):
+    return dict({'t': 'zone', 'id': id, 'name': name, 'status': 0, 'type': 'master', 'email': 'admin@provider.test', 'ttl': 7200,
+                 'refresh': 14400, 'retry': 3600, 'expire': 604800, 'minimum': 3600}, **values)
+
+
+def record_row(id, zone, kind, host, value, opt='', ttl=None):
+    return {'t': 'record', 'id': id, 'zone_id': zone, 'type': kind, 'host': host, 'val': value, 'opt': opt, 'ttl': ttl}
+
+
+PLESK_IPV4, PLESK_IPV6 = '203.0.113.5', '2001:db8:5::5'
+NOVA_IPV4, NOVA_IPV6 = '198.51.100.119', '2001:db8:100::a877'
+SHOP_RECORDS = [
+    record_row(1, 31, 'NS', 'shop.test.', 'ns.provider.test.'), record_row(2, 31, 'NS', 'shop.test.', 'ns2.provider.test.'),
+    record_row(3, 31, 'A', 'shop.test.', PLESK_IPV4), record_row(4, 31, 'AAAA', 'shop.test.', '2001:0db8:5:0::5', ttl=60),
+    record_row(5, 31, 'A', 'ipv4.shop.test.', PLESK_IPV4, ttl=60), record_row(6, 31, 'A', 'mail.shop.test.', '198.51.100.7'),
+    record_row(7, 31, 'CNAME', 'www.shop.test.', 'shop.test.'), record_row(8, 31, 'CNAME', '*.shop.test.', 'shop.test.'),
+    record_row(9, 31, 'MX', 'shop.test.', 'mail.provider.test.', '10', 7200),
+    record_row(10, 31, 'SRV', '_autodiscover._tcp.shop.test.', 'mail.provider.test.', '5 25 443'),
+    record_row(11, 31, 'TXT', 'shop.test.', 'v=spf1 +a +mx -all', ttl=86400),
+    record_row(12, 31, 'TXT', '_dmarc.shop.test.', 'v=DMARC1; p=none'), record_row(21, 31, 'TXT', 'dkim._domainkey.shop.test.', 'v=DKIM1; k=rsa; p=MIIB'),
+    record_row(13, 31, 'TXT', 'quoted.shop.test.', 'say "hi"'), record_row(14, 31, 'CAA', 'shop.test.', 'letsencrypt.org', 'issue'),
+    record_row(15, 31, 'A', 'elsewhere.test.', PLESK_IPV4), record_row(16, 31, 'AXFR', '', '198.51.100.1'),
+    record_row(17, 31, 'NS', 'dev.shop.test.', 'ns.provider.test.'), record_row(18, 31, 'NS', 'ext.shop.test.', 'ns1.other.test.'),
+    record_row(19, 31, 'A', 'a' * 60 + '.shop.test.', '198.51.100.8'), record_row(20, 31, 'TXT', '*.shop.test.', 'wild', ttl=30),
+]
+
+
+class HostingApi:
+    """Admin reads of dns_plan(): the client's hosting addresses and the zones already in the new ISPConfig."""
+    zones = []
+
+    def get(self, path):
+        assert path == '/me/hosting-addresses?client_id=6', path
+        return {'client_id': 6, 'web': [{'server_id': 4, 'server_name': 'web0.target.test', 'is_default': True,
+                                         'ipv4': [NOVA_IPV4], 'ipv6': [NOVA_IPV6]}],
+                'mail': [], 'dns': [{'server_id': 7, 'server_name': 'ns1.target.test', 'is_default': True, 'nameservers': [
+                    {'name': 'ns1.target.test', 'ipv4': ['192.0.2.53'], 'ipv6': []}, {'name': 'ns2.target.test', 'ipv4': [], 'ipv6': []}]}]}
+
+    def all(self, path, **query):
+        assert path == '/dns/soa' and set(query) == {'origin'}, (path, query)
+        return [zone for zone in self.zones if zone['origin'] == query['origin']]
+
+
+class PleskDnsTests(unittest.TestCase):
+    def zone(self, records=SHOP_RECORDS, **values):
+        return m.nova_zone(zone_row(31, 'shop.test', **values), records, plesk_addresses={PLESK_IPV4, PLESK_IPV6},
+                           ipv4=NOVA_IPV4, ipv6=NOVA_IPV6, nameservers=['ns1.target.test', 'ns2.target.test'])
+
+    def test_zone_copy_changes_only_the_name_servers_and_the_plesk_addresses(self):
+        zone = self.zone()
+        self.assertEqual({'origin': 'shop.test.', 'ns': 'ns1.target.test.', 'mbox': 'admin.provider.test.', 'ttl': 7200, 'refresh': 14400,
+                          'retry': 3600, 'expire': 604800, 'minimum': 3600, 'active': False}, zone['soa'])
+
+        found = {(record['name'], record['type'], m.record_value(record)): record for record in zone['records']}
+        long_name = 'a' * 60
+        self.assertEqual({
+            ('shop.test.', 'NS', 'ns1.target.test.'), ('shop.test.', 'NS', 'ns2.target.test.'),
+            ('shop.test.', 'A', NOVA_IPV4), ('shop.test.', 'AAAA', NOVA_IPV6), ('ipv4.shop.test.', 'A', NOVA_IPV4),
+            ('mail.shop.test.', 'A', '198.51.100.7'), ('www.shop.test.', 'CNAME', 'shop.test.'), ('*.shop.test.', 'CNAME', 'shop.test.'),
+            ('shop.test.', 'MX', '10 mail.provider.test.'), ('_autodiscover._tcp.shop.test.', 'SRV', '5 25 443 mail.provider.test.'),
+            ('shop.test.', 'SPF', 'v=spf1 mx a -all'), ('dkim._domainkey.shop.test.', 'DKIM', 'v=DKIM1; k=rsa; p=MIIB'),
+            ('_dmarc.shop.test.', 'DMARC', 'v=DMARC1; p=none'),
+            ('dev.shop.test.', 'NS', 'ns1.target.test.'), ('dev.shop.test.', 'NS', 'ns2.target.test.'),
+            ('ext.shop.test.', 'NS', 'ns1.other.test.'), (long_name, 'A', '198.51.100.8'), ('*.shop.test.', 'TXT', 'wild'),
+        }, set(found))
+        # TTLs: the record's own, else the zone's; ISPConfig's minimum is 60 s.
+        self.assertEqual([7200, 60, 7200, 86400, 60], [found[key]['ttl'] for key in (
+            ('shop.test.', 'A', NOVA_IPV4), ('shop.test.', 'AAAA', NOVA_IPV6), ('shop.test.', 'MX', '10 mail.provider.test.'),
+            ('shop.test.', 'SPF', 'v=spf1 mx a -all'), ('*.shop.test.', 'TXT', 'wild'))])
+        self.assertEqual({'type': 'SRV', 'name': '_autodiscover._tcp.shop.test.', 'priority': 5, 'weight': 25, 'port': 443,
+                          'hostname': 'mail.provider.test.', 'ttl': 7200, 'active': True},
+                         found[('_autodiscover._tcp.shop.test.', 'SRV', '5 25 443 mail.provider.test.')])
+        # DMARC is created last: ISPConfig checks for the DKIM and SPF records then. SPF as ISPConfig writes it.
+        self.assertEqual('DMARC', zone['records'][-1]['type'])
+        self.assertEqual([{'name': 'shop.test', 'old': 'v=spf1 +a +mx -all', 'new': 'v=spf1 mx a -all'}], zone['rewritten'])
+        self.assertEqual([('ipv4.shop.test', 'A'), ('shop.test', 'A'), ('shop.test', 'AAAA')],
+                         sorted((item['name'], item['type']) for item in zone['remapped']))
+        self.assertEqual(['elsewhere.test A %s (outside the zone)' % PLESK_IPV4,
+                          'quoted.shop.test TXT say "hi" (value ISPConfig does not accept as is)',
+                          'shop.test CAA letsencrypt.org (CAA records are not copied)'], sorted(zone['manual']))
+
+    def test_name_server_glue_stays_and_a_missing_ipv6_is_left_to_the_operator(self):
+        records = [record_row(1, 40, 'NS', 'provider.test.', 'ns.provider.test.'), record_row(2, 40, 'A', 'ns.provider.test.', PLESK_IPV4),
+                   record_row(3, 40, 'A', 'www.provider.test.', PLESK_IPV4), record_row(4, 40, 'AAAA', 'www.provider.test.', PLESK_IPV6)]
+        zone = m.nova_zone(zone_row(40, 'provider.test', email='Jana.Novak@provider.test', ttl=30), records,
+                           plesk_addresses={PLESK_IPV4, PLESK_IPV6}, ipv4=NOVA_IPV4, ipv6=None, nameservers=['ns1.target.test'])
+        self.assertEqual({('ns.provider.test.', PLESK_IPV4), ('www.provider.test.', NOVA_IPV4)},
+                         {(record['name'], record['data']) for record in zone['records'] if record['type'] == 'A'})
+        self.assertEqual(['www.provider.test AAAA %s (the new web server has no IPv6 address)' % PLESK_IPV6], zone['manual'])
+        self.assertEqual(('jana.novak.provider.test.', 60), (zone['soa']['mbox'], zone['soa']['ttl']))
+        self.assertEqual('hostmaster.provider.test.', m.nova_zone(zone_row(40, 'provider.test', email='x y@z'), records,
+                         plesk_addresses=set(), ipv4=None, ipv6=None, nameservers=['ns1.target.test'])['soa']['mbox'])
+
+    def test_spf_and_dmarc_become_the_fields_of_their_ispconfig_records_or_are_left_to_the_operator(self):
+        fields = m.spf_fields('v=spf1 +a +mx +a:plesk.example.net ip4:192.0.2.0/24 ip6:2001:db8::1 include:_spf.provider.test ~all')
+        self.assertEqual({'allow_mx': True, 'allow_a': True, 'hostname': 'plesk.example.net', 'ipv4_address': '192.0.2.0/24',
+                          'ipv6_address': '2001:db8::1', 'include': '_spf.provider.test', 'policy': 'softfail'}, fields)
+        self.assertEqual('v=spf1 mx a ip4:192.0.2.0/24 ip6:2001:db8::1 a:plesk.example.net include:_spf.provider.test ~all', m.spf_text(fields))
+        for text in ('v=spf1 include:x.test', 'v=spf1 a +all', 'v=spf1 ptr -all', 'v=spf1 -ip4:192.0.2.1 -all', 'v=spf1 redirect=x.test',
+                     'v=spf1 -all a', 'v=spf1 ip4:2001:db8::1 -all', 'v=spf1 mx:mail.test -all'):
+            with self.subTest(text=text):
+                self.assertIsNone(m.spf_fields(text))
+        fields = m.dmarc_fields('v=DMARC1; p=reject; rua=mailto:a@x.test, mailto:b@y.test; pct=50; aspf=s')
+        self.assertEqual({'policy': 'reject', 'rua': 'mailto:a@x.test,mailto:b@y.test', 'pct': 50, 'aspf': 's'}, fields)
+        self.assertEqual('v=DMARC1; p=reject; rua=mailto:a@x.test,mailto:b@y.test; aspf=s; pct=50', m.dmarc_text(fields))
+        for text in ('v=DMARC1; rua=mailto:a@x.test', 'v=DMARC1; p=none; fo=d', 'v=DMARC1; p=all', 'v=DMARC1; p=none; rua=a@x.test'):
+            with self.subTest(text=text):
+                self.assertIsNone(m.dmarc_fields(text))
+        # Without a DKIM record ISPConfig refuses DMARC: left to the operator, like DMARC it cannot express.
+        zone = self.zone([record_row(1, 31, 'TXT', '_dmarc.shop.test.', 'v=DMARC1; p=quarantine; adkim=s; aspf=s'),
+                          record_row(2, 31, 'TXT', 'shop.test.', 'v=spf1 a mx -all'),
+                          record_row(3, 31, 'TXT', '_dmarc.shop.test.', 'v=DMARC1; p=none; fo=d')])
+        self.assertEqual(['_dmarc.shop.test TXT v=DMARC1; p=none; fo=d (DMARC that ISPConfig cannot hold as is)',
+                          '_dmarc.shop.test TXT v=DMARC1; p=quarantine; adkim=s; aspf=s (ISPConfig accepts DMARC only in a zone with a '
+                          'DKIM record)'], sorted(zone['manual']))
+
+    def test_inventory_lists_the_zones_of_the_website_its_aliases_and_subdomains(self):
+        inventory = m.plesk_inventory(PLESK_ROWS, PLESK_ACCOUNT, 'shop.test')
+        self.assertEqual([(31, 'shop.test', 'website'), (35, 'blog.shop.test', 'subdomain'), (34, 'mail-only.test', 'alias'),
+                          (32, 'shop.example', 'alias')],
+                         [(zone['id'], zone['domain'], zone['role']) for zone in inventory['dns_zones']])
+
+    def migration(self, objects=None):
+        migration = object.__new__(m.Migration)
+        migration.client_id, migration.kind, migration.target = 6, 'plesk', {'web_server_id': 4}
+        migration.admin = migration.api = HostingApi()
+        migration.state = {'objects': objects or {}, 'inventory': {'dns_zones': [
+            {'id': 31, 'domain': 'shop.test', 'role': 'website'}, {'id': 32, 'domain': 'shop.example', 'role': 'alias'},
+            {'id': 33, 'domain': 'gone.example', 'role': 'alias'}, {'id': 34, 'domain': 'mail-only.test', 'role': 'alias'},
+            {'id': 35, 'domain': 'blog.shop.test', 'role': 'subdomain'}, {'id': 36, 'domain': 'other.test', 'role': 'alias'}]}}
+        migration.save = lambda: None
+        return migration
+
+    def test_only_zones_public_dns_delegates_to_plesk_are_planned(self):
+        rows = [zone_row(31, 'shop.test'), zone_row(32, 'shop.example'), zone_row(34, 'mail-only.test', status=16),
+                zone_row(35, 'blog.shop.test'), zone_row(36, 'other.test'), {'t': 'ip', 'address': PLESK_IPV4}] + SHOP_RECORDS + [
+            record_row(30, 32, 'NS', 'shop.example.', 'ns.provider.test.'), record_row(31, 35, 'NS', 'blog.shop.test.', 'ns.provider.test.'),
+            record_row(32, 36, 'NS', 'other.test.', 'ns.provider.test.')]
+        public = {'shop.test': (['ns.provider.test', 'ns2.provider.test'], None), 'shop.example': (['ns1.registrar.test'], None),
+                  'blog.shop.test': (['ns.provider.test'], None), 'other.test': ([], 'NXDOMAIN')}
+        HostingApi.zones = [{'id': 90, 'origin': 'blog.shop.test.'}]
+        self.addCleanup(setattr, HostingApi, 'zones', [])
+        plan = self.migration().dns_plan(rows=rows, lookup=public.get)
+        self.assertEqual(['shop.test'], [zone['origin'] for zone in plan['zones']])
+        self.assertEqual((7, NOVA_IPV4, NOVA_IPV6), (plan['zones'][0]['soa']['server_id'], plan['ipv4'], plan['ipv6']))
+        self.assertEqual([
+            'shop.example: public DNS does not use the Plesk name servers (ns1.registrar.test)',
+            'gone.example: no DNS zone in Plesk',
+            'mail-only.test: DNS is switched off in Plesk',
+            'blog.shop.test: the zone already exists in the new ISPConfig (zone ID 90) and is left unchanged',
+            'other.test: public DNS does not use the Plesk name servers (NXDOMAIN)'], plan['skipped'])
+        # A zone this migration created is its own, not "already exists".
+        HostingApi.zones = [{'id': 90, 'origin': 'shop.test.'}]
+        plan = self.migration({'zone:shop.test': {'record': {'id': 90}}}).dns_plan(rows=rows, lookup=public.get)
+        self.assertEqual(['shop.test', 'blog.shop.test'], [zone['origin'] for zone in plan['zones']])
+
+    def test_dns_counts_and_the_client_without_a_dns_server(self):
+        migration = self.migration({'zone:shop.test': {'record': {'id': 90}}, 'rr:shop.test:0': {'record': {'id': 1}}})
+        migration.state['dns'] = {'zones': [{'origin': 'shop.test', 'records': [{}, {}, {}]}, {'origin': 'shop.example', 'records': [{}]}]}
+        self.assertEqual({'dns_zones': 1, 'dns_records': 3}, migration.dns_counts())
+        migration.dns = False
+        self.assertEqual({}, migration.dns_counts())
+        migration.admin = MagicMock()
+        migration.admin.get.return_value = {'web': [], 'dns': []}
+        with self.assertRaisesRegex(m.MigrationError, 'no DNS server .* \\(--no-dns\\)'):
+            migration.hosting_addresses()
+
+    def test_public_name_servers_come_from_the_resolver(self):
+        dns = FakeDns({'shop.test': [('NS', 'ns.provider.test'), ('NS', 'NS2.provider.test')], 'www.shop.test': [('A', PLESK_IPV4)]})
+        self.addCleanup(dns.close)
+        self.assertEqual((['ns.provider.test', 'ns2.provider.test'], None), m.public_nameservers('Shop.Test.', [dns.address]))
+        self.assertEqual(([], 'NXDOMAIN'), m.public_nameservers('gone.test', [dns.address]))
+        self.assertEqual(([], 'no NS records'), m.public_nameservers('www.shop.test', [dns.address]))  # not a zone of its own
+
+    def test_dns_command_shows_or_creates_only_the_zones(self):
+        migration = self.migration()
+        migration.domain, migration.release_client_key = 'shop.test', MagicMock()
+        plan = {'nameservers': [{'name': 'ns1.target.test', 'ipv4': []}], 'skipped': [], 'zones': [
+            {'origin': 'shop.test', 'records': [{}], 'remapped': [{'name': 'shop.test', 'type': 'A', 'old': PLESK_IPV4, 'new': NOVA_IPV4}],
+             'rewritten': [], 'manual': ['x (y)']}]}
+        migration.prepare_dns, migration.create_dns = MagicMock(return_value=plan), MagicMock()
+        migration.usage_summary = MagicMock(return_value={'counts': {key: {'used': 0, 'limit': None} for key in m.COUNT_LIMITS}})
+        output = io.StringIO()
+        with patch('sys.stdout', output):
+            migration.dns_only(plan_only=True)
+        migration.create_dns.assert_not_called()
+        for line in ('DNS: shop.test → ISPConfig client 6', '  shop.test: 1 records; A/AAAA of the Plesk server (%s -> %s) become the '
+                     "new web server's for: shop.test" % (PLESK_IPV4, NOVA_IPV4), '  MANUAL x (y)', 'change the domains\' name servers'):
+            self.assertIn(line, output.getvalue())
+        with patch('sys.stdout', io.StringIO()):
+            migration.dns_only()
+        migration.create_dns.assert_called_once_with(plan)
+        self.assertEqual(2, migration.release_client_key.call_count)  # the client key is switched off in every case
+        migration.kind = 'ispconfig'
+        with self.assertRaisesRegex(m.MigrationError, '--dns creates the DNS zones of a Plesk website'):
+            migration.dns_only()
+
+    def test_dns_options(self):
+        self.assertTrue(m.parse_args(['--simple', 'shop.test', '6', '--from', 'plesk', '--dns']).dns)
+        self.assertEqual('plan', m.parse_args(['--simple', 'shop.test', '6', '--dns', '--plan']).command)
+        self.assertTrue(m.parse_args(['--simple', 'shop.test', '6', '--no-dns']).no_dns)
+        for argv in (['--dns', '--no-dns'], ['--dns', '--sync']):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit), patch('sys.stderr', io.StringIO()):
+                m.parse_args(['--simple', 'shop.test', '6'] + argv)
+        self.assertEqual('dns', m.parse_args(['dns', '--config', 'c', '--domain', 'shop.test', '--client-id', '6', '--state', 's']).command)
 
 
 if __name__ == '__main__':

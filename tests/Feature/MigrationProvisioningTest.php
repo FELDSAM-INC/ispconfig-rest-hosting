@@ -4,6 +4,8 @@ namespace IspconfigRestHosting\Tests\Feature;
 
 use Illuminate\Support\Facades\DB;
 use Symfony\Component\Process\Process;
+use Tests\Support\DnsJournalReplay;
+use Tests\Support\ServerSchema;
 use Tests\Support\UsageApiTestCase;
 
 /**
@@ -13,6 +15,8 @@ use Tests\Support\UsageApiTestCase;
  */
 class MigrationProvisioningTest extends UsageApiTestCase
 {
+    use DnsJournalReplay;
+
     private const MB = 1048576;
 
     protected function setUp(): void
@@ -229,10 +233,10 @@ PY;
         $this->assertSame(-1, (int) DB::table('web_database')->value('database_quota'));
     }
 
-    private function phpVersions(): array
+    private function phpVersions(array $versions = [['PHP 5.6', '5.6', 'y', 0], ['PHP 8.3', '8.3', 'y', 0], ['PHP 7.4', '7.4', 'n', 0], ['PHP 8.1', '8.1', 'y', 999]]): array
     {
         $ids = [];
-        foreach ([['PHP 5.6', '5.6', 'y', 0], ['PHP 8.3', '8.3', 'y', 0], ['PHP 7.4', '7.4', 'n', 0], ['PHP 8.1', '8.1', 'y', 999]] as [$name, $version, $active, $client]) {
+        foreach ($versions as [$name, $version, $active, $client]) {
             $ids[$version] = (int) DB::table('server_php')->insertGetId([
                 'server_id' => 1, 'client_id' => $client, 'name' => $name, 'active' => $active,
                 'php_fpm_init_script' => 'php'.$version.'-fpm', 'php_fpm_ini_dir' => '/etc/php/'.$version.'/fpm',
@@ -313,8 +317,14 @@ PY;
             'url' => 'https://shop.test/cron', 'create' => true, 'reason' => null, 'type' => 'url', 'php_cli' => '/usr/bin/php'];
         $manual = ['schedule' => ['0', '1', '*', '*', '*'], 'source' => 'cd /httpdocs && php run.php', 'description' => null,
             'reason' => 'shell syntax', 'create' => false, 'type' => 'full', 'php_cli' => '/usr/bin/php'];
+        // The website (alt-php81-fpm) and its subdomain with its own folder (alt-php74-fpm) keep their Plesk PHP versions.
+        $php = $this->phpVersions([['PHP 8.1', '8.1', 'y', 0], ['PHP 7.4', '7.4', 'y', 0], ['PHP 8.3', '8.3', 'y', 0]]);
         [$result, $calls] = $this->runMigration($this->pleskMigration([$wpCron, $fetch, $manual]));
         $this->assertTrue($result['ok'], $result['error'] ?? '');
+        $this->assertSame(['version' => '8.1', 'server_php_id' => $php['8.1'], 'source' => 'plesk'], $result['state']['php']);
+        $this->assertSame(['s3' => ['version' => '7.4', 'server_php_id' => $php['7.4']]], $result['state']['php_children']);
+        $this->assertSame($php['8.1'], (int) DB::table('web_domain')->where('type', 'vhost')->value('server_php_id'));
+        $this->assertSame($php['7.4'], (int) DB::table('web_domain')->where('type', 'vhostsubdomain')->value('server_php_id'));
         $key = $result['state']['client_key']['id'];
         $this->assertSame([
             'POST /system/api-keys 201', 'PUT /system/api-keys/'.$key.' 200', 'POST /sites/web-domains 201',
@@ -339,6 +349,20 @@ PY;
         $this->assertEqualsCanonicalizing(['shop-old_db', 'shop_wp'], array_keys($result['state']['databases']));
         $this->assertSame(['shop_all', 'shop_wpuser'], $result['state']['databases']['shop_wp']['old_users']);
 
+        // A Plesk version the new web server does not offer stops before any write; --php chooses another.
+        DB::table('cron')->delete();
+        DB::table('web_domain')->delete();
+        DB::table('web_database')->delete();
+        DB::table('web_database_user')->delete();
+        DB::table('server_php')->where('server_php_id', $php['8.1'])->update(['active' => 'n']);
+        [$refused, $calls] = $this->runMigration($this->pleskMigration([]));
+        $this->assertFalse($refused['ok']);
+        $this->assertSame('The Plesk website runs PHP 8.1 (alt-php81-fpm), which the new web server does not offer: PHP 8.1 is not an '
+            .'active PHP-FPM version of the destination web server for this client (available: PHP 7.4, PHP 8.3). Choose another '
+            .'version with --php VERSION.', $refused['error']);
+        $this->assertSame([], $this->writes($calls));
+        DB::table('server_php')->where('server_php_id', $php['8.1'])->update(['active' => 'y']);
+
         // Without wildcard subdomains in the plan, or room for every cron job, nothing is written.
         DB::table('cron')->delete();
         DB::table('web_domain')->delete();
@@ -354,6 +378,113 @@ PY;
         [$refused, $calls] = $this->runMigration($this->pleskMigration([$wpCron, $fetch]));
         $this->assertFalse($refused['ok']);
         $this->assertStringStartsWith('Client limit for cron jobs is too small: limit 1, used 0, migration needs 2 more.', $refused['error']);
+        $this->assertSame([], $this->writes($calls));
+    }
+
+    /** Plesk's rows of the zones of shop.test (31) and its alias shop.example (32), as plesk-source.py reads them. */
+    private function pleskDns(): array
+    {
+        $zone = fn (int $id, string $name): array => ['t' => 'zone', 'id' => $id, 'name' => $name, 'status' => 0, 'type' => 'master',
+            'email' => 'admin@provider.test', 'ttl' => 7200, 'refresh' => 14400, 'retry' => 3600, 'expire' => 604800, 'minimum' => 3600];
+        $record = fn (int $id, int $zone, string $type, string $host, string $value, string $opt = '', ?int $ttl = null): array => [
+            't' => 'record', 'id' => $id, 'zone_id' => $zone, 'type' => $type, 'host' => $host, 'val' => $value, 'opt' => $opt, 'ttl' => $ttl];
+
+        return ['rows' => [
+            $zone(31, 'shop.test'), $zone(32, 'shop.example'),
+            $record(1, 31, 'NS', 'shop.test.', 'ns.provider.test.'), $record(2, 31, 'NS', 'shop.test.', 'ns2.provider.test.'),
+            $record(3, 31, 'A', 'shop.test.', '203.0.113.5', '', 60), $record(4, 31, 'AAAA', 'shop.test.', '2001:db8:5::5', '', 60),
+            $record(5, 31, 'CNAME', 'www.shop.test.', 'shop.test.'), $record(6, 31, 'CNAME', '*.shop.test.', 'shop.test.'),
+            $record(7, 31, 'MX', 'shop.test.', 'mail.provider.test.', '10', 7200),
+            $record(8, 31, 'SRV', '_autodiscover._tcp.shop.test.', 'mail.provider.test.', '5 25 443'),
+            $record(9, 31, 'TXT', 'shop.test.', 'v=spf1 +a +mx include:_spf.provider.test -all', '', 86400),
+            $record(10, 31, 'TXT', '_dmarc.shop.test.', 'v=DMARC1; p=quarantine; adkim=s; aspf=s'),
+            $record(11, 31, 'TXT', 'dkim._domainkey.shop.test.', self::DKIM),
+            $record(12, 31, 'A', 'mail.shop.test.', '198.51.100.7'), $record(13, 31, 'NS', 'dev.shop.test.', 'ns1.other.test.'),
+            $record(14, 31, 'TXT', '*.shop.test.', 'next to a CNAME'),  // Plesk allowed it; ISPConfig refuses data at a CNAME
+            $record(20, 32, 'NS', 'shop.example.', 'ns.provider.test.'), $record(21, 32, 'A', 'shop.example.', '203.0.113.5'),
+            $record(22, 32, 'CNAME', 'www.shop.example.', 'shop.example.'),
+            ['t' => 'ip', 'address' => '203.0.113.5'], ['t' => 'ip', 'address' => '2001:db8:5::5'],
+        ], 'public' => ['shop.test' => ['ns.provider.test', 'ns2.provider.test'], 'shop.example' => ['ns.provider.test']]];
+    }
+
+    /** A 2048-bit DKIM key: longer than one 255-byte TXT string. */
+    private const DKIM = 'v=DKIM1;k=rsa;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmfN0qucHwkD5QjiPaz6+OTt7KY9haLl2WqOV1DnfFEtdj7dqQ'
+        .'McHYDr65FGdOEG5tJehLl40cbxZFf3O3T2nH9v8h+euO9XqB+OmmXtwFk61ARwxe6ph9FxzyDanSpvMWuPsDuHAfqYX5z4i7uNZANlxLY8X75PZlM0daJZ9hC'
+        .'tmeiZM8QEwmL9hd+zDVi8ik1eK0fXEOVJp+E3igm73N36AHe2U+o//Cva02nN2glEVwxIciRO/8bc2Ls/yDLV/REBR6EgsptCMu7A940sOMCcvr0Lf/Sbn+9ajd8R'
+        .'wnyCk+cQSRGqK8W+Y/PNsKRXmpDcQ4hVqB6V/c3qbUNblbQIDAQAB';
+
+    public function test_plesk_dns_zones_pass_the_api_and_are_switched_on_complete(): void
+    {
+        ServerSchema::create();  // server_ip
+        DB::table('server')->insert(['server_id' => 3, 'server_name' => 'ns1.target.test', 'web_server' => 0, 'mail_server' => 0,
+            'db_server' => 0, 'dns_server' => 1, 'mirror_server_id' => 0, 'active' => 1]);
+        foreach ([[1, 'IPv4', '198.51.100.119'], [1, 'IPv6', '2001:db8:100::a877'], [1, 'IPv4', '10.20.30.21'], [3, 'IPv4', '198.51.100.153']] as [$server, $type, $address]) {
+            DB::table('server_ip')->insert(['server_id' => $server, 'client_id' => 0, 'ip_type' => $type, 'ip_address' => $address]);
+        }
+        DB::table('sys_ini')->where('sysini_id', 1)->update(['config' => "[sites]\ndefault_remote_dbserver=\n[dns]\ndns_external_slave_fqdn=ns2.target.test\n"]);
+        $this->assignServers('clientB', ['web' => [1], 'db' => [1], 'dns' => [3]]);
+        $this->setClientLimit('clientB', 'limit_dns_zone', 2);
+        $this->setClientLimit('clientB', 'limit_dns_record', 40);
+        $request = $this->pleskMigration([]);
+        $request['inventory']['dns_zones'] = [['id' => 31, 'domain' => 'shop.test', 'role' => 'website'],
+            ['id' => 32, 'domain' => 'shop.example', 'role' => 'alias']];
+        $request['dns'] = $this->pleskDns();
+        $request['dns_only'] = true;
+
+        [$result, $calls] = $this->runMigration($request);
+
+        $this->assertTrue($result['ok'], $result['error'] ?? '');
+        $this->assertTrue($result['state']['dns']['done']);
+        $this->assertSame([['name' => 'shop.test', 'old' => 'v=spf1 +a +mx include:_spf.provider.test -all',
+            'new' => 'v=spf1 mx a include:_spf.provider.test -all']], $result['state']['dns']['zones'][0]['rewritten']);
+        $this->assertSame(['*.shop.test. TXT next to a CNAME (rejected by the new ISPConfig: REST POST /dns/records returned HTTP 422: '
+            .'validation-failed)'], $result['state']['dns']['zones'][0]['manual']);
+        $zones = DB::table('dns_soa')->orderBy('origin')->get()->keyBy('origin');
+        $this->assertSame(['shop.example.', 'shop.test.'], $zones->keys()->all());
+        $group = $this->tenant('clientB')['groupid'];
+        foreach ($zones as $zone) {
+            $this->assertSame(['ns1.target.test.', 'admin.provider.test.', 'Y', 3, $group, 7200],
+                [$zone->ns, $zone->mbox, $zone->active, (int) $zone->server_id, (int) $zone->sys_groupid, (int) $zone->ttl]);
+        }
+        $records = DB::table('dns_rr')->where('zone', $zones['shop.test.']->id)->orderBy('id')->get()
+            ->map(fn ($rr) => [$rr->name, $rr->type, $rr->data, (int) $rr->aux, (int) $rr->ttl, $rr->active])->all();
+        $this->assertEqualsCanonicalizing([
+            ['shop.test.', 'NS', 'ns1.target.test.', 0, 7200, 'Y'], ['shop.test.', 'NS', 'ns2.target.test.', 0, 7200, 'Y'],
+            ['*.shop.test.', 'CNAME', 'shop.test.', 0, 7200, 'Y'],
+            ['_autodiscover._tcp.shop.test.', 'SRV', '25 443 mail.provider.test.', 5, 7200, 'Y'],
+            ['_dmarc.shop.test.', 'TXT', 'v=DMARC1; p=quarantine; adkim=s; aspf=s', 0, 7200, 'Y'],
+            ['dev.shop.test.', 'NS', 'ns1.other.test.', 0, 7200, 'Y'], ['dkim._domainkey.shop.test.', 'TXT', self::DKIM, 0, 7200, 'Y'],
+            ['mail.shop.test.', 'A', '198.51.100.7', 0, 7200, 'Y'],
+            ['shop.test.', 'A', '198.51.100.119', 0, 60, 'Y'], ['shop.test.', 'AAAA', '2001:db8:100::a877', 0, 60, 'Y'],
+            ['shop.test.', 'MX', 'mail.provider.test.', 10, 7200, 'Y'],
+            ['shop.test.', 'TXT', 'v=spf1 mx a include:_spf.provider.test -all', 0, 86400, 'Y'],  // as ISPConfig's SPF record writes it
+            ['www.shop.test.', 'CNAME', 'shop.test.', 0, 7200, 'Y'],
+        ], $records);
+        $this->assertSame(['198.51.100.119'], DB::table('dns_rr')->where('zone', $zones['shop.example.']->id)->where('type', 'A')->pluck('data')->all());
+        // Created inactive with the client's key, then switched on once complete: ISPConfig's DNS server never loads a part.
+        $key = $result['state']['client_key']['id'];
+        $writes = $this->writes($calls);
+        $this->assertSame(['POST /system/api-keys 201', 'PUT /system/api-keys/'.$key.' 200', 'POST /dns/soa 201'], array_slice($writes, 0, 3));
+        $on = array_search('PUT /dns/soa/'.$zones['shop.test.']->id.' 200', $writes, true);
+        $this->assertSame(['POST /dns/records 201' => 13, 'POST /dns/records 422' => 1], array_count_values(array_slice($writes, 3, $on - 3)));
+        $this->assertSame(['POST /dns/soa 201', 'POST /dns/records 201', 'POST /dns/records 201', 'POST /dns/records 201',
+            'POST /dns/records 201', 'PUT /dns/soa/'.$zones['shop.example.']->id.' 200', 'PUT /system/api-keys/'.$key.' 200'],
+            array_slice($writes, $on + 1));
+        $this->assertSame([], $this->rejectedZoneWrites('shop.test.'));
+        $this->assertSame([], $this->rejectedZoneWrites('shop.example.'));
+
+        // A repeated run finds the zones done; with no room for another zone nothing is written.
+        $request['state'] = $result['state'];
+        [$again, $calls] = $this->runMigration($request);
+        $this->assertTrue($again['ok'], $again['error'] ?? '');
+        $this->assertSame(['PUT /system/api-keys/'.$key.' 200'], $this->writes($calls));
+        DB::table('dns_rr')->delete();
+        DB::table('dns_soa')->delete();
+        $this->setClientLimit('clientB', 'limit_dns_zone', 1);
+        unset($request['state']);
+        [$refused, $calls] = $this->runMigration($request);
+        $this->assertFalse($refused['ok']);
+        $this->assertStringStartsWith('Client limit for DNS zones is too small: limit 1, used 0, migration needs 2 more.', $refused['error']);
         $this->assertSame([], $this->writes($calls));
     }
 

@@ -210,7 +210,7 @@ The Plesk server needs only its own `python3` (CloudLinux/RHEL 8 `platform-pytho
 `setpriv`, `crontab` and `mysqldump`. Nothing is installed or written there:
 
 - Plesk's metadata comes from `plesk db` **SELECT** statements (domains, hosting, aliases, databases and their
-  users, IP addresses, 30-day traffic). The Plesk REST API would need a key created on the server and lacks the
+  users, IP addresses, 30-day traffic, DNS zones and records). The Plesk REST API would need a key created on the server and lacks the
   PHP handler, the system user and the traffic; the CLI utilities print text only.
 - Files and sizes are read **as the subscription's system user** (`setpriv`), so a symlink a customer places in the
   webspace cannot make root read other files. A file that user cannot read stops the copy.
@@ -220,7 +220,8 @@ The Plesk server needs only its own `python3` (CloudLinux/RHEL 8 `platform-pytho
 ```bash
 ispcp-migrate --sites --from plesk              # which Plesk websites are live (DNS), as above
 ispcp-migrate --from plesk example.com 123 --plan
-ispcp-migrate --from plesk example.com 123 --php 8.2
+ispcp-migrate --from plesk example.com 123 --php 8.2   # another PHP version than on Plesk
+ispcp-migrate --from plesk example.com 123 --dns       # only the DNS zones (e.g. of a website copied earlier)
 ```
 
 What is migrated, per Plesk domain with website hosting (a suspended or disabled domain stops the plan):
@@ -234,15 +235,46 @@ What is migrated, per Plesk domain with website hosting (a suspended or disabled
 | Subdomain with its folder inside the document root (`httpdocs/blog`) | Subdomain with its own web folder (`web/blog`) |
 | Local MySQL/MariaDB databases Plesk assigns to the domain | New databases and users; WordPress configs using any of the database's Plesk users are updated |
 | Cron jobs of the subscription's system user | ISPConfig cron jobs, created **inactive** |
+| PHP version of the domain and of each subdomain with its own folder (`alt-php74-fpm` → 7.4) | The same PHP version on the new web server |
+| DNS zones of the domain, its aliases and subdomains that public DNS delegates to Plesk | DNS zones of the client on its DNS server, see below |
 
 The plan lists everything else: subdomains or additional domains of the subscription with their own folder
 (migrate each one separately, `ispcp-migrate --from plesk sub.example.com 123`), aliases used only for mail or DNS,
 forwarding subdomains, files of the webspace outside the document root (e.g. `wordpress-backups`), and databases
 assigned to another domain of the subscription. Plesk often assigns all databases to the subscription's main
 domain: `--database NAME` (repeatable) migrates exactly these databases of the subscription instead, e.g. the one an
-additional domain's WordPress uses. The source PHP version comes from the Plesk handler (`alt-php74-fpm` → 7.4);
-the plan prints it and suggests `--php` when the new website would differ. Per-domain PHP settings, mail, DNS,
-certificates and Plesk extensions (WP Toolkit, Imunify) are not migrated.
+additional domain's WordPress uses. Per-domain PHP settings, mail, certificates and Plesk extensions (WP Toolkit,
+Imunify) are not migrated.
+
+**PHP version.** The new website gets the PHP version of the Plesk domain, read from its handler (`alt-php74-fpm` or
+`plesk-php82-fpm` → 7.4 / 8.2) and looked up like `--php` below. When the new web server does not offer that
+version to the client, the plan stops before any write and lists the versions it does offer; `--php VERSION` then
+chooses one. A subdomain with its own folder keeps its own Plesk version (or gets the website's when the new web
+server lacks it, which the plan shows); `--php` sets the website and its subdomains. A handler without a version
+(e.g. Apache module) leaves `target.server_php_id`.
+
+**DNS zones.** Plesk zones of the domain, its aliases (also those for mail or DNS only) and the subdomains migrated
+with it are recreated on the client's DNS server in the new ISPConfig when public DNS really uses them: the zone is
+switched on in Plesk and its NS records in public DNS (the resolvers of `--sites`) include one of the zone's Plesk
+name servers. Zones hosted elsewhere, unregistered domains, subzones nobody delegates and zones that already exist
+in the new ISPConfig are listed and left alone. The copy keeps every record, TTL and the SOA timers, except:
+
+- the zone's NS records and the SOA primary become the name servers of the client's DNS server
+  (`GET /me/hosting-addresses`); a subzone delegated to the Plesk name servers is delegated to these too;
+- A and AAAA records with an address of the Plesk server become the new web server's IPv4/IPv6 address (the
+  addresses of the Plesk name servers themselves stay);
+- SPF and DMARC become ISPConfig's SPF and DMARC records, which write the same rules in their own order
+  (`+a +mx` → `mx a`; the plan prints each changed text); DKIM is copied verbatim. ISPConfig accepts a DMARC record
+  only in a zone with a DKIM record and one SPF record, so a DMARC without DKIM is listed as `MANUAL`, like SPF or
+  DMARC that ISPConfig's records cannot express (`ptr`, `redirect=`, `+all`, DMARC `fo=`) and record types it does
+  not hold (e.g. Plesk's `HTTPS`).
+
+The zones are created with the client's key (its `limit_dns_zone`/`limit_dns_record` are checked in the plan) once
+the copy is complete: each zone inactive, then its records, then switched on, so ISPConfig's DNS server loads it
+once, complete. A record ISPConfig refuses is listed as `MANUAL` and the rest of the zone is still created. Nothing
+changes for visitors until the domain's name servers are changed at its registrar to the ones the plan prints.
+`--dns` creates only the zones (shown with `--plan`), e.g. for a website copied by an earlier version; `--no-dns`
+migrates without them, and the plan stops with that hint when the client has no DNS server.
 
 **Cron jobs.** Paths in the subscription's webspace are rewritten: relative ones (`httpdocs/wp-cron.php`, Plesk runs
 jobs in the webspace), chroot ones (`/httpdocs/…`) and absolute ones (`/var/www/vhosts/example.com/httpdocs/…`)
@@ -454,8 +486,11 @@ The `plesk` variant of the integration test runs a Plesk source in the container
 the subscription's system user and crontab, the administrator password file): `--sites`, the inventory and plan,
 reads as the subscription user (a root-only file stops the copy), dumps as the Plesk administrator including a
 database name with a hyphen, the wildcard, the alias redirect, a subdomain folder, an inactive cron job with
-rewritten paths, the old-path review, WordPress configuration and a final sync, and that nothing is written on the
+rewritten paths, the PHP version, the old-path review, WordPress configuration, the DNS zone of a domain public DNS
+delegates to Plesk (and not of its alias hosted elsewhere) and a final sync, and that nothing is written on the
 Plesk side. `MigrationProvisioningTest` also provisions a Plesk inventory through the real API, including the
-wildcard and cron limits that stop before any write.
+wildcard and cron limits that stop before any write, the PHP versions of the website and its subdomain, and DNS
+zones with SPF, DMARC, DKIM, MX, SRV and delegation records (created inactive, switched on complete, checked by
+replaying the journal like ISPConfig's DNS server, and the client's DNS zone limit).
 These tests are **not a live ISPConfig instance**. A first production migration must
 start with `plan` and an application test before DNS changes.

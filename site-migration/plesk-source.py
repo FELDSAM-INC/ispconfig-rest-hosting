@@ -18,10 +18,10 @@ QUERIES = [
     "SELECT JSON_OBJECT('t','domain','id',d.id,'name',d.name,'htype',d.htype,'status',d.status,"
     "'webspace_id',d.webspace_id,'parent_id',d.parentDomainId,'www_root',h.www_root,'login',s.login,"
     "'home',s.home,'shell',s.shell,'php_handler',h.php_handler_id,'client',c.login,'company',c.cname,"
-    "'contact',c.pname) FROM domains d LEFT JOIN hosting h ON h.dom_id=d.id "
+    "'contact',c.pname,'dns_zone_id',d.dns_zone_id) FROM domains d LEFT JOIN hosting h ON h.dom_id=d.id "
     "LEFT JOIN sys_users s ON s.id=h.sys_user_id LEFT JOIN clients c ON c.id=d.cl_id",
     "SELECT JSON_OBJECT('t','alias','id',a.id,'dom_id',a.dom_id,'name',a.name,'status',a.status,"
-    "'web',a.web,'seo_redirect',a.seoRedirect) FROM domain_aliases a",
+    "'web',a.web,'seo_redirect',a.seoRedirect,'dns_zone_id',a.dns_zone_id) FROM domain_aliases a",
     "SELECT JSON_OBJECT('t','database','id',b.id,'name',b.name,'type',b.type,'dom_id',b.dom_id,"
     "'server_id',b.db_server_id,'default_user_id',b.default_user_id) FROM data_bases b",
     "SELECT JSON_OBJECT('t','dbuser','id',u.id,'login',u.login,'db_id',u.db_id,'dom_id',u.dom_id) FROM db_users u",
@@ -31,6 +31,13 @@ QUERIES = [
 ]
 TRAFFIC = ("SELECT JSON_OBJECT('t','traffic','dom_id',dom_id,'bytes',SUM(http_in+http_out)) FROM DomainsTraffic "
            "WHERE date >= CURDATE() - INTERVAL 30 DAY GROUP BY dom_id")
+# DNS zones (zone settings in seconds), their records and the server's addresses, for the zones the migration
+# recreates on the new DNS server.
+DNS = ("SELECT JSON_OBJECT('t','zone','id',z.id,'name',z.name,'status',z.status,'type',z.type,'email',z.email,'ttl',z.ttl,"
+       "'refresh',z.refresh,'retry',z.retry,'expire',z.expire,'minimum',z.minimum) FROM dns_zone z WHERE z.id IN (%s)",
+       "SELECT JSON_OBJECT('t','record','id',r.id,'zone_id',r.dns_zone_id,'type',r.type,'host',r.host,'val',r.val,'opt',r.opt,"
+       "'ttl',r.ttl) FROM dns_recs r WHERE r.dns_zone_id IN (%s)")
+ADDRESSES = "SELECT JSON_OBJECT('t','ip','address',i.ip_address) FROM IP_Addresses i"
 DATABASE = re.compile(r'[A-Za-z0-9_-]{1,64}\Z')
 LOGIN = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}\Z')
 
@@ -143,6 +150,12 @@ def main():
         result = account(request)
     elif action == 'size':
         result = size(request)
+    elif action == 'dns':
+        zones = request['zones']
+        if not isinstance(zones, list) or not all(type(zone) is int and zone > 0 for zone in zones):
+            fail('Invalid DNS zone IDs')
+        ids = ','.join(str(zone) for zone in sorted(set(zones)))
+        result = {'rows': select([query % ids for query in DNS] + [ADDRESSES]) if zones else []}
     elif action == 'dump':
         dump(request)
         return

@@ -224,6 +224,38 @@ class PleskFakeApi(FakeApi):
         return super().request(method, endpoint, payload)
 
 
+class PleskDnsApi(PleskFakeApi):
+    """The client's hosting addresses and the DNS zone/record writes (with the client's key)."""
+
+    def all(self, path, **query):
+        if path == '/servers/1/php-versions':  # the Plesk website runs alt-php81-fpm
+            return [{'id': 31, 'name': 'PHP 8.1', 'active': 'y', 'client_id': 0, 'php_fpm_ini_dir': '/etc/php/8.1/fpm',
+                     'php_cli_binary': '/usr/bin/php8.1'}]
+        return super().all(path, **query)
+
+    def get(self, path):
+        if path == '/me/hosting-addresses?client_id=3':
+            return {'client_id': 3, 'web': [{'server_id': 1, 'server_name': 'web0.target.test', 'is_default': True,
+                                             'ipv4': ['192.0.2.104'], 'ipv6': ['2001:db8::104']}], 'mail': [],
+                    'dns': [{'server_id': 9, 'server_name': 'ns1.target.test', 'is_default': True,
+                             'nameservers': [{'name': 'ns1.target.test', 'ipv4': [], 'ipv6': []},
+                                             {'name': 'ns2.target.test', 'ipv4': [], 'ipv6': []}]}]}
+        return super().get(path)
+
+    def request(self, method, endpoint, payload):
+        if endpoint.startswith('/dns/'):
+            assert self.key == 'test-scoped-key', 'DNS zones belong to the client'
+            if method == 'PUT':
+                self.rows[endpoint].update(payload)
+                return self.rows[endpoint], None
+            self.posts += 1
+            PleskFakeApi.next_id += 1
+            row = dict(payload, id=PleskFakeApi.next_id, sys_groupid=3)
+            self.rows['%s/%d' % (endpoint, row['id'])] = row
+            return row, None
+        return super().request(method, endpoint, payload)
+
+
 def plesk_fixture():
     """A Plesk server in the container: `plesk db` over a psa schema, the subscription's system user and its crontab."""
     Path('/usr/local/psa').mkdir(parents=True)
@@ -235,23 +267,37 @@ def plesk_fixture():
     Path('/etc/psa/.psa.shadow').chmod(0o600)
     sql("""CREATE USER 'admin'@'localhost' IDENTIFIED BY '%s'; GRANT ALL ON *.* TO 'admin'@'localhost';
         CREATE DATABASE psa;
-        CREATE TABLE psa.domains(id INT, name VARCHAR(255), htype VARCHAR(16), status INT, webspace_id INT, parentDomainId INT, cl_id INT);
+        CREATE TABLE psa.domains(id INT, name VARCHAR(255), htype VARCHAR(16), status INT, webspace_id INT, parentDomainId INT, cl_id INT,
+            dns_zone_id INT);
         CREATE TABLE psa.hosting(dom_id INT, www_root VARCHAR(255), sys_user_id INT, php_handler_id VARCHAR(64));
         CREATE TABLE psa.sys_users(id INT, login VARCHAR(64), home VARCHAR(255), shell VARCHAR(255));
         CREATE TABLE psa.clients(id INT, login VARCHAR(64), cname VARCHAR(255), pname VARCHAR(255));
-        CREATE TABLE psa.domain_aliases(id INT, dom_id INT, name VARCHAR(255), status INT, web ENUM('false','true'), seoRedirect ENUM('false','true'));
+        CREATE TABLE psa.domain_aliases(id INT, dom_id INT, name VARCHAR(255), status INT, web ENUM('false','true'), seoRedirect ENUM('false','true'),
+            dns_zone_id INT);
+        CREATE TABLE psa.dns_zone(id INT, name VARCHAR(255), status INT, type ENUM('slave','master'), email VARCHAR(255), ttl INT,
+            refresh INT, retry INT, expire INT, minimum INT);
+        CREATE TABLE psa.dns_recs(id INT, dns_zone_id INT, type VARCHAR(16), host VARCHAR(255), val TEXT, opt VARCHAR(255), ttl INT);
         CREATE TABLE psa.data_bases(id INT, name VARCHAR(64), type VARCHAR(16), dom_id INT, db_server_id INT, default_user_id INT);
         CREATE TABLE psa.db_users(id INT, login VARCHAR(64), db_id INT, dom_id INT);
         CREATE TABLE psa.DatabaseServers(id INT, host VARCHAR(255), port INT, type VARCHAR(16));
         CREATE TABLE psa.IP_Addresses(id INT, ip_address VARCHAR(64));
         CREATE TABLE psa.DomainsTraffic(dom_id INT, date DATE, http_in BIGINT, http_out BIGINT);
-        INSERT INTO psa.domains VALUES (1,'shop.test','vrt_hst',0,0,0,1), (2,'_.shop.test','vrt_hst',0,1,1,1),
-            (3,'blog.shop.test','vrt_hst',0,1,1,1), (4,'addon.test','vrt_hst',0,1,0,1);
+        INSERT INTO psa.domains VALUES (1,'shop.test','vrt_hst',0,0,0,1,1), (2,'_.shop.test','vrt_hst',0,1,1,1,NULL),
+            (3,'blog.shop.test','vrt_hst',0,1,1,1,NULL), (4,'addon.test','vrt_hst',0,1,0,1,3);
         INSERT INTO psa.hosting VALUES (1,'%s/httpdocs',1,'alt-php81-fpm'), (2,'%s/httpdocs',1,'alt-php81-fpm'),
             (3,'%s/httpdocs/blog',1,'alt-php81-fpm'), (4,'%s/addon.test',1,'alt-php81-fpm');
         INSERT INTO psa.sys_users VALUES (1,'shopuser','%s','/usr/local/psa/bin/chrootsh');
         INSERT INTO psa.clients VALUES (1,'shop','Shop s.r.o.','Jana');
-        INSERT INTO psa.domain_aliases VALUES (1,1,'shop.example',0,'true','true');
+        INSERT INTO psa.domain_aliases VALUES (1,1,'shop.example',0,'true','true',2);
+        INSERT INTO psa.dns_zone VALUES (1,'shop.test',0,'master','admin@plesk.test',7200,14400,3600,604800,3600),
+            (2,'shop.example',0,'master','admin@plesk.test',7200,14400,3600,604800,3600),
+            (3,'addon.test',0,'master','admin@plesk.test',7200,14400,3600,604800,3600);
+        INSERT INTO psa.dns_recs VALUES (1,1,'NS','shop.test.','ns.plesk.test.','',NULL), (2,1,'A','shop.test.','127.0.0.1','',60),
+            (3,1,'CNAME','www.shop.test.','shop.test.','',NULL), (4,1,'MX','shop.test.','mail.provider.test.','10',NULL),
+            (5,1,'TXT','shop.test.','v=spf1 +a +mx -all','',NULL), (6,1,'TXT','_dmarc.shop.test.','v=DMARC1; p=none','',NULL),
+            (7,1,'A','ftp.shop.test.','198.51.100.7','',NULL), (8,1,'AXFR','','10.0.0.1','',NULL),
+            (9,2,'NS','shop.example.','ns.plesk.test.','',NULL), (10,2,'A','shop.example.','127.0.0.1','',NULL),
+            (11,3,'NS','addon.test.','ns.plesk.test.','',NULL);
         INSERT INTO psa.data_bases VALUES (11,'shop_wp','mysql',1,1,NULL), (12,'shop-old_db','mysql',1,1,22);
         INSERT INTO psa.db_users VALUES (21,'shop_wpuser',11,1), (22,'shop_old',12,1);
         INSERT INTO psa.DatabaseServers VALUES (1,'localhost',3306,'mysql');
@@ -320,10 +366,13 @@ def plesk_main():
     assert sites['shop.test']['hostnames'][:4] == ['shop.test', 'www.shop.test', 'shop.example', 'www.shop.example'], sites['shop.test']
     assert (sites['addon.test']['status'], sites['addon.test']['parent']) == ('other', 'shop.test'), sites['addon.test']
     assert report['old_addresses'] == {'127.0.0.1': '127.0.0.1'}, report['old_addresses']
-    m.Api = PleskFakeApi
+    m.Api = PleskDnsApi
     temporary = set(os.listdir('/tmp'))
+    # Public DNS: shop.test is served by the Plesk name server, its alias by another provider.
+    public = FakeDns({'shop.test': [('NS', 'ns.plesk.test')], 'shop.example': [('NS', 'ns1.registrar.test')]})
     with tempfile.TemporaryDirectory(prefix='migration-test-') as state:
         migration = m.Migration(config, state, 'shop.test', 3)
+        migration.resolvers = [public.address]
         migration.plan()
         assert FakeApi.posts == 0
         inventory = migration.state['inventory']
@@ -347,6 +396,7 @@ def plesk_main():
         unreadable.unlink()
         Path('/var/www/clients/client3/web104').chmod(0o755)
         migration = m.Migration(config, state, 'shop.test', 3)
+        migration.resolvers = [public.address]
         try:
             migration.run(source_quiesced=True)
         except m.MigrationError as exc:
@@ -358,8 +408,23 @@ def plesk_main():
         assert report['old_path_references'] == ['web/.user.ini'] and report['wordpress_updated'] == ['web/wp-config.php'], report
         target_root = Path('/var/www/clients/client3/web104')
         (tree / 'web/.user.ini').write_text("auto_prepend_file = '%s/web/wordfence-waf.php'\n" % target_root)
+        assert not any(key.startswith('/dns/') for key in PleskFakeApi.rows), 'DNS zones only once the copy is complete'
         migration.publish(config_reviewed=True)
         assert migration.state['phase'] == 'copied'
+        zones = {row['origin']: row for key, row in PleskFakeApi.rows.items() if key.startswith('/dns/soa/')}
+        assert list(zones) == ['shop.test.'] and zones['shop.test.']['active'] is True, zones
+        assert (zones['shop.test.']['ns'], zones['shop.test.']['server_id']) == ('ns1.target.test.', 9), zones
+        records = sorted((row['name'], row['type'], m.record_value(row), row['ttl']) for key, row in PleskFakeApi.rows.items()
+                         if key.startswith('/dns/records/'))
+        assert records == [('ftp.shop.test.', 'A', '198.51.100.7', 7200), ('shop.test.', 'A', '192.0.2.104', 60),
+                           ('shop.test.', 'MX', '10 mail.provider.test.', 7200), ('shop.test.', 'NS', 'ns1.target.test.', 7200),
+                           ('shop.test.', 'NS', 'ns2.target.test.', 7200), ('shop.test.', 'SPF', 'v=spf1 mx a -all', 7200),
+                           ('www.shop.test.', 'CNAME', 'shop.test.', 7200)], records
+        dns = migration.state['dns']
+        assert dns['done'] and dns['zones'][0]['manual'] == [
+            '_dmarc.shop.test TXT v=DMARC1; p=none (ISPConfig accepts DMARC only in a zone with a DKIM record)'], dns
+        assert dns['skipped'] == ['shop.example: public DNS does not use the Plesk name servers (ns1.registrar.test)'], dns['skipped']
+        assert PleskFakeApi.rows['/system/api-keys/501']['active'] is False, 'the client key is switched off after the DNS zones'
         assert (target_root / 'web/index.php').read_text() == '<?php echo "shop";'
         assert (target_root / 'web/blog/index.html').read_text() == 'blog'
         assert os.readlink(target_root / 'web/media') == 'wp-content/uploads' and (target_root / 'web/media/photo.txt').read_text() == 'photo'
@@ -380,7 +445,8 @@ def plesk_main():
         assert [(row['domain'], row['web_folder']) for row in blog] == [('blog.shop.test', 'web/blog')], blog
         cron = [row for key, row in rows.items() if key.startswith('/sites/cron-jobs/')]
         assert [(row['command'], row['active'], row['run_min']) for row in cron] == [
-            ('/usr/bin/php -f %s/web/feed.php' % target_root, False, '7,37')], cron
+            ('/usr/bin/php8.1 -f %s/web/feed.php' % target_root, False, '7,37')], cron
+        assert (site['server_php_id'], blog[0]['server_php_id']) == (31, 31), 'PHP 8.1 as on Plesk'
         # Final sync: new source rows and files, deleted files; the reviewed path is checked again.
         sql("INSERT INTO shop_wp.items VALUES (2, 'new');")
         (PLESK_HOME / 'httpdocs/delete-on-sync.txt').unlink()
@@ -400,11 +466,12 @@ def plesk_main():
         assert FakeApi.posts == posts, 'sync must not create objects again'
         assert [job['source'] for job in migration.state['cron_jobs']] == ["/opt/alt/php81/usr/bin/php -f 'httpdocs/feed.php'"]
         assert 'old secret' not in (Path(state) / 'state.json').read_text()
+    public.close()
     # Nothing was written on the Plesk side: no option files, sources unchanged.
     assert not set(os.listdir('/tmp')) - temporary, set(os.listdir('/tmp')) - temporary
     assert (PLESK_HOME / 'httpdocs/.user.ini').read_text().startswith("auto_prepend_file = '%s/httpdocs" % PLESK_HOME)
     print('PASS (plesk): --sites, inventory, plan, reads as the subscription user, dumps as the Plesk admin, wildcard, alias redirect, '
-          'subdomain folder, inactive cron, old path review, WordPress config, symlinks, final sync')
+          'subdomain folder, inactive cron, old path review, WordPress config, symlinks, DNS zones, final sync')
 
 
 def main():
