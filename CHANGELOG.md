@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-11-09
+
 ### Changed
 
 - New websites (with subdomain and alias websites that have their own folder) start with OPcache off and
@@ -15,6 +17,13 @@ versions follow [Semantic Versioning](https://semver.org/).
   Wordfence's `auto_prepend_file` in `.user.ini` and the paths in `wordfence-waf.php` (with the PHP-FPM chroot,
   `/web/…` in the files only PHP reads). The files are printed and listed in `configuration-report.json`
   (`old_paths_rewritten`); what still names the old webspace stops publication for review as before.
+
+### Upgrade notes
+
+- `ispconfig-rest extension:update hosting --tag v1.8.0 && ispconfig-rest server-tools update --components migration --server 4`
+  (the web server with the migration tool). No database migration.
+- Existing websites keep their PHP settings; only websites created after the update start with OPcache off and
+  `short_open_tag` on. `WEB_PHP_NEW_SITE_DEFAULTS={}` in the API's `.env` keeps the previous behaviour.
 
 ## [1.7.0] - 2026-11-09
 
