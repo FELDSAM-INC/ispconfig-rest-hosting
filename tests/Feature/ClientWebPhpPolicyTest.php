@@ -70,24 +70,29 @@ final class ClientWebPhpPolicyTest extends ClientApiTestCase
             ->assertOk()->json('php_settings');
         $ini = fn (array $site): string => (string) DB::table('web_domain')->where('domain_id', $site['id'])->value('custom_php_ini');
         $site = $this->site(['php' => 'php-fpm']);
-        $this->assertSame("opcache.enable = off\nshort_open_tag = on\n", $ini($site));
+        $this->assertSame("opcache.enable = off\nshort_open_tag = on\nerror_reporting = E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT\n", $ini($site));
         $view = $settings($site);
-        $this->assertSame(['off', 'on'], [$view['values']['opcache.enable'], $view['values']['short_open_tag']]);
+        $this->assertSame(['off', 'on', 'E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT'],
+            [$view['values']['opcache.enable'], $view['values']['short_open_tag'], $view['values']['error_reporting']]);
         $this->assertContains('opcache.enable', $view['editable']);
-        $this->putJson('/api/v1/sites/web-domains/'.$site['id'], ['php_settings' => ['opcache.enable' => true, 'short_open_tag' => false]],
+        $this->assertContains('error_reporting', $view['editable']);
+        $this->putJson('/api/v1/sites/web-domains/'.$site['id'], ['php_settings' => ['opcache.enable' => true, 'short_open_tag' => false, 'error_reporting' => 'E_ALL']],
             $this->tenantHeaders('clientA'))->assertOk();
         $view = $settings($site);
-        $this->assertSame(['on', 'off'], [$view['values']['opcache.enable'], $view['values']['short_open_tag']]);
+        $this->assertSame(['on', 'off', 'E_ALL'], [$view['values']['opcache.enable'], $view['values']['short_open_tag'], $view['values']['error_reporting']]);
+        $this->assertSame(1, substr_count($ini($site), 'error_reporting'));
+        $this->putJson('/api/v1/sites/web-domains/'.$site['id'], ['php_settings' => ['error_reporting' => 'E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT']],
+            $this->tenantHeaders('clientA'))->assertOk();
         $this->assertSame(1, substr_count($ini($site), 'opcache.enable'));
         $child = $this->site(['type' => 'vhostsubdomain', 'parent_domain_id' => $site['id'], 'web_folder' => 'child', 'php' => 'php-fpm']);
-        $this->assertSame("opcache.enable = off\nshort_open_tag = on\n", $ini($child));
+        $this->assertSame("opcache.enable = off\nshort_open_tag = on\nerror_reporting = E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT\n", $ini($child));
 
         // Created under a product policy: its limits follow; removing the policy keeps the website's own settings.
         $this->applyPolicy($this->policy())->assertOk();
         $limited = $this->site();
-        $this->assertStringStartsWith("opcache.enable = off\nshort_open_tag = on\n; BEGIN ISPCONFIG REST PRODUCT PHP", $ini($limited));
+        $this->assertStringStartsWith("opcache.enable = off\nshort_open_tag = on\nerror_reporting = E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT\n; BEGIN ISPCONFIG REST PRODUCT PHP", $ini($limited));
         $this->applyPolicy(null)->assertOk();
-        $this->assertSame("opcache.enable = off\nshort_open_tag = on\n", $ini($limited));
+        $this->assertSame("opcache.enable = off\nshort_open_tag = on\nerror_reporting = E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT\n", $ini($limited));
 
         config(['web_php.new_site_defaults' => []]);
         $this->assertSame('', $ini($this->site()));

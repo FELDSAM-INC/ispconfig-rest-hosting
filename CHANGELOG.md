@@ -5,6 +5,17 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- PHP `error_reporting` choice `E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT`: errors are logged,
+  warnings, notices and deprecations are not.
+
+### Changed
+
+- New websites start with that `error_reporting` (besides OPcache off and `short_open_tag` on), so their logs are not
+  filled with warnings; the customer can change it in the panel. Existing websites keep their settings.
+  `WEB_PHP_NEW_SITE_DEFAULTS` also accepts `error_reporting` (one of the panel's choices).
+
 ## [1.8.0] - 2026-11-09
 
 ### Changed

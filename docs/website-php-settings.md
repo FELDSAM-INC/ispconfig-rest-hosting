@@ -7,11 +7,13 @@ normal website permissions and ISPConfig datalog. Raw PHP configuration retains
 its existing administrator-only permissions.
 
 A new website (also a subdomain or alias website with its own folder) starts with
-OPcache off and `short_open_tag` on, written to its own PHP configuration like a
-customer's change, so the customer can switch them in the panel. Only websites
+OPcache off, `short_open_tag` on and `error_reporting` set to
+`E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT` (errors are logged,
+warnings, notices and deprecations are not), written to its own PHP configuration
+like a customer's change, so the customer can switch them in the panel. Only websites
 created with their own `custom_php_ini` (administrator) are left as sent; existing
 websites are not changed. Other on/off defaults in the API's `.env`, e.g.
-`WEB_PHP_NEW_SITE_DEFAULTS={"opcache.enable":"off","short_open_tag":"on","display_errors":"off"}`;
+`WEB_PHP_NEW_SITE_DEFAULTS={"opcache.enable":"off","short_open_tag":"on","error_reporting":"E_ALL"}`;
 `{}` leaves new websites on the server's `php.ini`. OPcache stays on in the
 server's `php.ini`: PHP-FPM cannot switch it on for one website when the startup
 configuration disabled it.

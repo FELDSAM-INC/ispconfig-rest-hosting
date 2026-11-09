@@ -6,7 +6,7 @@ mkdir($root, 0755);
 $script = $root.'/read.php';
 file_put_contents($script, '<?php $out=[]; foreach (["memory_limit","max_execution_time","max_input_time","post_max_size","upload_max_filesize","opcache.enable","error_reporting","display_errors","log_errors","allow_url_fopen","file_uploads","short_open_tag"] as $key) {$out[$key]=ini_get($key);} foreach(["exec","shell_exec","opcache_get_status"] as $key){$out[$key]=function_exists($key);} echo json_encode($out);');
 $base = "memory_limit=1024M\nmax_execution_time=30\nmax_input_time=30\npost_max_size=512M\nupload_max_filesize=512M\ndisable_functions=exec,shell_exec\n";
-$changes = ['opcache.enable' => 'off', 'error_reporting' => 'E_ALL & ~E_NOTICE & ~E_STRICT & ~E_DEPRECATED', 'display_errors' => 'on', 'log_errors' => 'off', 'allow_url_fopen' => 'off', 'file_uploads' => 'off', 'short_open_tag' => 'off'];
+$changes = ['opcache.enable' => 'off', 'error_reporting' => 'E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT', 'display_errors' => 'on', 'log_errors' => 'off', 'allow_url_fopen' => 'off', 'file_uploads' => 'off', 'short_open_tag' => 'off'];
 function record(int $type, string $body): string
 {
     return pack('CCnnCC', 1, $type, 1, strlen($body), 0, 0).$body;
@@ -101,7 +101,7 @@ try {
                 if (! is_array($data)) {
                     throw new RuntimeException('Invalid output: '.$out);
                 }
-                foreach (['memory_limit' => '1024M', 'max_execution_time' => '30', 'max_input_time' => '30', 'post_max_size' => '512M', 'upload_max_filesize' => '512M', 'error_reporting' => '22519'] as $key => $value) {
+                foreach (['memory_limit' => '1024M', 'max_execution_time' => '30', 'max_input_time' => '30', 'post_max_size' => '512M', 'upload_max_filesize' => '512M', 'error_reporting' => '22517'] as $key => $value) {
                     if ($data[$key] !== $value) {
                         throw new RuntimeException($mode.' '.$key.' unexpected '.json_encode($data));
                     }

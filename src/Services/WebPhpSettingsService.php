@@ -13,7 +13,7 @@ final class WebPhpSettingsService
 {
     public const WRITABLE = ['opcache.enable', 'opcache_get_status', 'error_reporting', 'display_errors', 'log_errors', 'allow_url_fopen', 'file_uploads', 'short_open_tag'];
 
-    public const ERROR_REPORTING = ['0', 'E_ALL', 'E_ALL & ~E_DEPRECATED & ~E_STRICT', 'E_ALL & ~E_NOTICE & ~E_STRICT & ~E_DEPRECATED', 'E_ERROR | E_WARNING | E_PARSE'];
+    public const ERROR_REPORTING = ['0', 'E_ALL', 'E_ALL & ~E_DEPRECATED & ~E_STRICT', 'E_ALL & ~E_NOTICE & ~E_STRICT & ~E_DEPRECATED', 'E_ERROR | E_WARNING | E_PARSE', 'E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT'];
 
     public static function valid(mixed $settings): bool
     {
@@ -37,6 +37,12 @@ final class WebPhpSettingsService
         }
         $lines = [];
         foreach ((array) config('web_php.new_site_defaults', []) as $key => $value) {
+            if ($key === 'error_reporting') {
+                if (in_array($value, self::ERROR_REPORTING, true)) {
+                    $lines[] = $key.' = '.$value;
+                }
+                continue;
+            }
             $value = is_bool($value) ? ($value ? 'on' : 'off') : strtolower((string) $value);
             if (in_array($key, self::WRITABLE, true) && in_array($key, WebPhpDefaults::BOOLEAN_KEYS, true) && in_array($value, ['on', 'off'], true)) {
                 $lines[] = $key.' = '.$value;
