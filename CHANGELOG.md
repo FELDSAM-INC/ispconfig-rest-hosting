@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-11-09
+
 ### Added
 
 - PHP `error_reporting` choice `E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT`: errors are logged,
@@ -15,6 +17,16 @@ versions follow [Semantic Versioning](https://semver.org/).
 - New websites start with that `error_reporting` (besides OPcache off and `short_open_tag` on), so their logs are not
   filled with warnings; the customer can change it in the panel. Existing websites keep their settings.
   `WEB_PHP_NEW_SITE_DEFAULTS` also accepts `error_reporting` (one of the panel's choices).
+
+### Upgrade notes
+
+- The repository history was rewritten on 2026-11-09 (every commit and tag has a new hash). An install checked out
+  before that first re-fetches the tags, as root:
+  `. /etc/ispconfig-rest/install.conf; sudo -u "$RUN_USER" git -C "$INSTALL_DIR/extensions/hosting" fetch --force --tags origin`
+- `ispconfig-rest extension:update hosting --tag v1.9.0`. No database migration and no change to the server tools
+  (coming from 1.7.x, also update them as in 1.8.0).
+- Existing websites keep their PHP settings; `WEB_PHP_NEW_SITE_DEFAULTS` in the API's `.env` overrides the new
+  defaults as before.
 
 ## [1.8.0] - 2026-11-09
 
