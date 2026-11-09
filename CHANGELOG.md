@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-09
+
 ### Added
 
 - `ispcp-migrate --from plesk` recreates the website's DNS zones in the new ISPConfig: the zones of the domain, its
@@ -19,6 +21,13 @@ versions follow [Semantic Versioning](https://semver.org/).
 - `ispcp-migrate --from plesk` gives the new website the PHP version of the Plesk domain (`alt-php74-fpm` → 7.4), and
   each subdomain with its own folder its own version. A version the new web server does not offer stops the plan
   before any write; `--php` chooses another one, for the website and its subdomains.
+
+### Upgrade notes
+
+- `ispconfig-rest extension:update hosting --tag v1.7.0 && ispconfig-rest server-tools update --components migration --server 4`
+  (the web server with the migration tool).
+- The client needs a DNS server in the new ISPConfig for the DNS zones (else the plan stops; `--no-dns` migrates
+  without them). Websites copied earlier get their zones with `ispcp-migrate --from plesk DOMAIN CLIENT_ID --dns`.
 
 ## [1.6.2] - 2026-11-08
 
