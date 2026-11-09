@@ -317,6 +317,8 @@ def plesk_fixture():
                                                   "define('DB_NAME','shop_wp');\ndefine('DB_USER','shop_wpuser');\n"
                                                   "define('DB_PASSWORD','old secret');\ndefine('DB_HOST','localhost');\n")
     httpdocs.joinpath('.user.ini').write_text("auto_prepend_file = '%s/httpdocs/wordfence-waf.php'\n" % PLESK_HOME)
+    httpdocs.joinpath('wordfence-waf.php').write_text("<?php define('WFWAF_LOG_PATH', '%s/httpdocs/wp-content/wflogs/');\n" % PLESK_HOME)
+    httpdocs.joinpath('.htaccess').write_text('AuthUserFile %s/private-data/.htpasswd\n' % PLESK_HOME)  # not copied: review
     httpdocs.joinpath('wp-content/uploads/photo.txt').write_text('photo')
     httpdocs.joinpath('media').symlink_to(str(httpdocs / 'wp-content/uploads'))
     httpdocs.joinpath('blog/index.html').write_text('blog')
@@ -402,12 +404,14 @@ def plesk_main():
         except m.MigrationError as exc:
             assert 'Edit configs in the staged tree' in str(exc), str(exc)
         else:
-            raise AssertionError('old webspace path in .user.ini published without review')
+            raise AssertionError('old webspace path in .htaccess published without review')
         tree = Path(state) / 'round-000/tree'
         report = m.read_json(tree.parent / 'configuration-report.json')
-        assert report['old_path_references'] == ['web/.user.ini'] and report['wordpress_updated'] == ['web/wp-config.php'], report
+        assert report['old_path_references'] == ['web/.htaccess'] and report['wordpress_updated'] == ['web/wp-config.php'], report
+        assert report['old_paths_rewritten'] == ['web/.user.ini', 'web/wordfence-waf.php'], report
         target_root = Path('/var/www/clients/client3/web104')
-        (tree / 'web/.user.ini').write_text("auto_prepend_file = '%s/web/wordfence-waf.php'\n" % target_root)
+        assert (tree / 'web/.user.ini').read_text() == "auto_prepend_file = '%s/web/wordfence-waf.php'\n" % target_root
+        (tree / 'web/.htaccess').write_text('AuthUserFile %s/private/.htpasswd\n' % target_root)
         assert not any(key.startswith('/dns/') for key in PleskFakeApi.rows), 'DNS zones only once the copy is complete'
         migration.publish(config_reviewed=True)
         assert migration.state['phase'] == 'copied'
@@ -426,6 +430,7 @@ def plesk_main():
         assert dns['skipped'] == ['shop.example: public DNS does not use the Plesk name servers (ns1.registrar.test)'], dns['skipped']
         assert PleskFakeApi.rows['/system/api-keys/501']['active'] is False, 'the client key is switched off after the DNS zones'
         assert (target_root / 'web/index.php').read_text() == '<?php echo "shop";'
+        assert (target_root / 'web/.user.ini').read_text() == "auto_prepend_file = '%s/web/wordfence-waf.php'\n" % target_root
         assert (target_root / 'web/blog/index.html').read_text() == 'blog'
         assert os.readlink(target_root / 'web/media') == 'wp-content/uploads' and (target_root / 'web/media/photo.txt').read_text() == 'photo'
         assert not list(target_root.rglob('secret.txt')) and not (target_root / 'web/addon.test').exists()
@@ -459,7 +464,9 @@ def plesk_main():
             migration.run(sync=True, source_quiesced=True, target_quiesced=True)
         except m.MigrationError as exc:
             assert 'Edit configs in the staged tree' in str(exc), str(exc)
-        (Path(state) / 'round-001/tree/web/.user.ini').write_text("auto_prepend_file = '%s/web/wordfence-waf.php'\n" % target_root)
+        assert (Path(state) / 'round-001/tree/web/wordfence-waf.php').read_text() == (
+            "<?php define('WFWAF_LOG_PATH', '%s/web/wp-content/wflogs/');\n" % target_root)
+        (Path(state) / 'round-001/tree/web/.htaccess').write_text('AuthUserFile %s/private/.htpasswd\n' % target_root)
         migration.publish(config_reviewed=True)
         assert sql('SELECT COUNT(*) FROM `%s`.items' % wp['name']) == '2'
         assert not (target_root / 'web/delete-on-sync.txt').exists() and (target_root / 'web/new.txt').read_text() == 'new file'
@@ -471,7 +478,7 @@ def plesk_main():
     assert not set(os.listdir('/tmp')) - temporary, set(os.listdir('/tmp')) - temporary
     assert (PLESK_HOME / 'httpdocs/.user.ini').read_text().startswith("auto_prepend_file = '%s/httpdocs" % PLESK_HOME)
     print('PASS (plesk): --sites, inventory, plan, reads as the subscription user, dumps as the Plesk admin, wildcard, alias redirect, '
-          'subdomain folder, inactive cron, old path review, WordPress config, symlinks, DNS zones, final sync')
+          'subdomain folder, inactive cron, old paths rewritten and reviewed, WordPress config, symlinks, DNS zones, final sync')
 
 
 def main():

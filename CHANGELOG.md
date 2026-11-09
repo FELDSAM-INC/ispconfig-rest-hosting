@@ -5,6 +5,17 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- New websites (with subdomain and alias websites that have their own folder) start with OPcache off and
+  `short_open_tag` on in their own PHP settings, which the customer can change in the panel. Existing websites keep
+  their settings. `WEB_PHP_NEW_SITE_DEFAULTS` in the API's `.env` sets other on/off defaults (`{}`: the server's
+  `php.ini`), see [website PHP settings](docs/website-php-settings.md).
+- `ispcp-migrate --from plesk` changes the old document root in the copied configuration to the new website's, e.g.
+  Wordfence's `auto_prepend_file` in `.user.ini` and the paths in `wordfence-waf.php` (with the PHP-FPM chroot,
+  `/web/…` in the files only PHP reads). The files are printed and listed in `configuration-report.json`
+  (`old_paths_rewritten`); what still names the old webspace stops publication for review as before.
+
 ## [1.7.0] - 2026-11-09
 
 ### Added

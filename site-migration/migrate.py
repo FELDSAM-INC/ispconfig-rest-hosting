@@ -845,6 +845,51 @@ def old_path_references(tree, old_root, limit=200):
     return found
 
 
+# Read only by PHP's web runtime (FPM/CGI), which sees the website through the PHP-FPM chroot when it is on;
+# .htaccess is read by Apache (never chrooted). Other files may also be read by the CLI (cron, WP-CLI): those
+# keep the full path and, under a chroot, are left for review.
+PATH_FILES_RUNTIME = frozenset(('.user.ini', 'php.ini', 'wordfence-waf.php'))
+
+
+def rewrite_old_paths(tree, old_root, new_root, *, chroot=False):
+    """Change the old document root to the new website's in the staged configuration files old_path_references scans.
+
+    e.g. Wordfence's .user.ini auto_prepend_file and wordfence-waf.php, which name the Plesk httpdocs path.
+    new_root is the new website's root (document_root + /web); under a PHP-FPM chroot, PHP sees it as /web.
+    PHP-serialized strings (their stored length would no longer match) are left for review.
+    """
+    old = old_root.rstrip('/').encode()
+    pattern = re.compile(re.escape(old) + rb'(?![A-Za-z0-9._-])')
+    serialized = re.compile(rb's:[0-9]+:"[^"]*' + re.escape(old))
+    changed = []
+    for directory, dirs, files in os.walk(tree, followlinks=False):
+        dirs.sort()
+        for name in sorted(files):
+            path = Path(directory) / name
+            top = path.parent == Path(tree) / 'web'
+            if name not in PATH_FILES and not (top and name.endswith(('.php', '.ini'))):
+                continue
+            runtime = name in PATH_FILES_RUNTIME or name.endswith('.ini')
+            if name == '.htaccess':
+                target = new_root
+            elif runtime:
+                target = '/web' if chroot else new_root
+            elif chroot:
+                continue
+            else:
+                target = new_root
+            with contextlib.suppress(OSError):
+                if not path.is_file() or path.is_symlink() or path.stat().st_size > MB:
+                    continue
+                data = path.read_bytes()
+                if not pattern.search(data) or serialized.search(data):
+                    continue
+                replacement = target.rstrip('/').encode()
+                path.write_bytes(pattern.sub(lambda _: replacement, data))
+                changed.append(str(path.relative_to(tree)))
+    return changed
+
+
 # --- DNS zones of a Plesk website ------------------------------------------------------------
 # Plesk's transfer ACL and secondary-zone rows are no zone data.
 PLESK_DNS_SKIP = frozenset(('AXFR', 'master', 'none'))
@@ -1985,7 +2030,8 @@ class Migration:
     def configure(self, tree):
         if (tree.parent / 'configuration-report.json').exists():
             report = read_json(tree.parent / 'configuration-report.json')
-            self.state['manual_configuration'] = bool(report['manual_files'] or report['databases_needing_manual_config'])
+            self.state['manual_configuration'] = bool(report['manual_files'] or report['databases_needing_manual_config']
+                                                      or report.get('old_path_references'))
             self.save()
             return
         updated, manual, covered = [], [], set()
@@ -2010,7 +2056,14 @@ class Migration:
         report = {'wordpress_updated': updated, 'manual_files': manual, 'databases_needing_manual_config': missing}
         if self.kind == 'plesk':
             # e.g. Wordfence's .user.ini auto_prepend_file: PHP stops on the new server until the path is changed.
-            report['old_path_references'] = old_path_references(tree, self.state['inventory']['site']['document_root'])
+            site, target = self.state['inventory']['site'], self.state['objects']['site']['record']
+            report['old_paths_rewritten'] = rewrite_old_paths(tree, site['www_root'], target['document_root'] + '/web',
+                                                              chroot=target.get('php_fpm_chroot') in (True, 'y'))
+            if report['old_paths_rewritten']:
+                print('Old Plesk paths (%s) changed to the new website in: %s'
+                      % (site['www_root'], ', '.join(report['old_paths_rewritten'])), flush=True)
+            # What is left names the old webspace outside the copied document root (or needs review under a chroot).
+            report['old_path_references'] = old_path_references(tree, site['document_root'])
             manual = manual + report['old_path_references']
         atomic_json(tree.parent / 'configuration-report.json', report)
         self.state['manual_configuration'] = bool(manual or missing)
@@ -2510,7 +2563,8 @@ def interactive(migration, *, sync=False):
             report_file = tree.parent / 'configuration-report.json'
             if report_file.exists():
                 report = read_json(report_file)
-                for label, key in (('Review by hand', 'manual_files'), ('Still names the old Plesk webspace', 'old_path_references'),
+                for label, key in (('Review by hand', 'manual_files'), ('Old Plesk paths changed (check)', 'old_paths_rewritten'),
+                                   ('Still names the old Plesk webspace', 'old_path_references'),
                                    ('No configuration found for database', 'databases_needing_manual_config')):
                     if report.get(key):
                         print('%s: %s' % (label, ', '.join(report[key][:20]) + (' …' if len(report[key]) > 20 else '')))

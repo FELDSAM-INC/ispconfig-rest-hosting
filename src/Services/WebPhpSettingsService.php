@@ -29,6 +29,24 @@ final class WebPhpSettingsService
         return true;
     }
 
+    /** The configured settings of a new website (web_php.new_site_defaults), unless it is created with its own PHP configuration. */
+    public function seed(WebDomain $site): void
+    {
+        if (! in_array($site->type, ['vhost', 'vhostsubdomain', 'vhostalias'], true) || trim((string) $site->custom_php_ini) !== '') {
+            return;
+        }
+        $lines = [];
+        foreach ((array) config('web_php.new_site_defaults', []) as $key => $value) {
+            $value = is_bool($value) ? ($value ? 'on' : 'off') : strtolower((string) $value);
+            if (in_array($key, self::WRITABLE, true) && in_array($key, WebPhpDefaults::BOOLEAN_KEYS, true) && in_array($value, ['on', 'off'], true)) {
+                $lines[] = $key.' = '.$value;
+            }
+        }
+        if ($lines !== []) {
+            $site->setAttribute('custom_php_ini', implode("\n", $lines)."\n");
+        }
+    }
+
     private function defaults(WebDomain $site): ?array
     {
         if (! in_array($site->php, ['fast-cgi', 'php-fpm'], true) || ! Schema::hasTable('api_web_php_defaults')) {

@@ -791,6 +791,53 @@ class PleskTests(unittest.TestCase):
             (web / 'wp-content/.htaccess').write_text('php_value include_path /var/www/vhosts/shop.test.old/x')  # other site
             self.assertEqual(['web/.user.ini', 'web/index.php'], m.old_path_references(tree, '/var/www/vhosts/shop.test'))
 
+    def test_wordfence_and_other_configuration_get_the_new_document_root(self):
+        old, new = '/var/www/vhosts/shop.test/httpdocs', '/var/www/clients/client3/web104/web'
+        files = {
+            'web/.user.ini': "; Wordfence WAF\nauto_prepend_file = '%s/wordfence-waf.php'\n; END Wordfence WAF\n" % old,
+            'web/wordfence-waf.php': "<?php\nif (file_exists('%s/wp-content/plugins/wordfence/waf/bootstrap.php')) {\n"
+                                     "\tdefine(\"WFWAF_LOG_PATH\", '%s/wp-content/wflogs/');\n}\n" % (old, old),
+            'web/.htaccess': 'AuthUserFile %s/.htpasswd\nAuthGroupFile /var/www/vhosts/shop.test/private/groups\n' % old,
+            'web/wp-config.php': "<?php define('WP_TEMP_DIR', '%s/wp-content/tmp');\n" % old,
+            'web/blog/.user.ini': 'auto_prepend_file = "%s/blog/wordfence-waf.php"\n' % old,
+            'web/cache.php': '<?php $c = \'a:1:{s:4:"path";s:43:"%s/x";}\';\n' % old,  # serialized: review
+            'web/other.php': '<?php // %s.old/x and %sbackup/x\n' % (old, old),  # other folders: unchanged
+            'web/wp-content/data.php': '<?php // %s\n' % old,  # deeper PHP: not scanned
+        }
+        with tempfile.TemporaryDirectory() as tree:
+            for name, content in files.items():
+                Path(tree, name).parent.mkdir(parents=True, exist_ok=True)
+                Path(tree, name).write_text(content)
+            Path(tree, 'web/.user.ini').chmod(0o640)
+            changed = m.rewrite_old_paths(tree, old + '/', new)
+            self.assertEqual(['web/.htaccess', 'web/.user.ini', 'web/wordfence-waf.php', 'web/wp-config.php', 'web/blog/.user.ini'],
+                             changed)
+            read = lambda name: Path(tree, name).read_text()
+            self.assertEqual("; Wordfence WAF\nauto_prepend_file = '%s/wordfence-waf.php'\n; END Wordfence WAF\n" % new,
+                             read('web/.user.ini'))
+            self.assertEqual(0o640, Path(tree, 'web/.user.ini').stat().st_mode & 0o777)
+            self.assertNotIn(old, read('web/wordfence-waf.php'))
+            self.assertIn("'%s/wp-content/wflogs/'" % new, read('web/wordfence-waf.php'))
+            self.assertIn('/var/www/vhosts/shop.test/private/groups', read('web/.htaccess'))
+            for name in ('web/cache.php', 'web/other.php', 'web/wp-content/data.php'):
+                self.assertEqual(files[name], read(name))
+            # What is left still stops publication for review.
+            self.assertEqual(['web/.htaccess', 'web/cache.php', 'web/other.php'],
+                             m.old_path_references(tree, '/var/www/vhosts/shop.test'))
+
+    def test_php_fpm_chroot_paths_for_files_only_php_reads(self):
+        old, new = '/var/www/vhosts/shop.test/httpdocs', '/var/www/clients/client3/web104/web'
+        with tempfile.TemporaryDirectory() as tree:
+            (Path(tree) / 'web').mkdir()
+            for name in ('.user.ini', 'wordfence-waf.php', '.htaccess', 'wp-config.php'):
+                Path(tree, 'web', name).write_text('x %s/wordfence-waf.php\n' % old)
+            self.assertEqual(['web/.htaccess', 'web/.user.ini', 'web/wordfence-waf.php'],
+                             m.rewrite_old_paths(tree, old, new, chroot=True))
+            self.assertEqual('x /web/wordfence-waf.php\n', Path(tree, 'web/.user.ini').read_text())
+            self.assertEqual('x /web/wordfence-waf.php\n', Path(tree, 'web/wordfence-waf.php').read_text())
+            self.assertEqual('x %s/wordfence-waf.php\n' % new, Path(tree, 'web/.htaccess').read_text())
+            self.assertEqual(['web/wp-config.php'], m.old_path_references(tree, '/var/www/vhosts/shop.test'))
+
     def test_absolute_links_into_the_plesk_document_root_become_relative(self):
         with tempfile.TemporaryDirectory() as tree:
             (Path(tree) / 'web/wp-content').mkdir(parents=True)

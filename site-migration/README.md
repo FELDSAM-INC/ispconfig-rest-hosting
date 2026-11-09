@@ -292,10 +292,15 @@ and fetches of `wp-cron.php` are left out, and the plan says so in one note. Aft
 WordPress cron of the website in WHMCS (WordPress tools). WP Toolkit usually disables WordPress's own cron
 (`DISABLE_WP_CRON` in `wp-config.php`), so scheduled WordPress tasks wait until then.
 
-**Old paths.** Configuration files in the copy that still name the old webspace (`.htaccess`, `.user.ini`,
-`php.ini`, `.env`, `wp-config.php`, `wordfence-waf.php`, PHP/ini files directly in the document root) are listed
-in `configuration-report.json` (`old_path_references`) and stop publication for review, like other manual
-configuration: for example Wordfence's `auto_prepend_file`, which would stop PHP on the new server. Edit the
+**Old paths.** Configuration files in the copy that name the old document root (`.htaccess`, `.user.ini`,
+`php.ini`, `.env`, `wp-config.php`, `wordfence-waf.php`, PHP/ini files directly in the document root) get the
+new website's path instead, e.g. Wordfence's `auto_prepend_file` in `.user.ini` and the paths in
+`wordfence-waf.php`, without which PHP stops on the new server. The changed files are printed and listed in
+`configuration-report.json` (`old_paths_rewritten`). With the PHP-FPM chroot on, files only PHP reads
+(`.user.ini`, `php.ini`, `wordfence-waf.php`, ini files) get `/web/…`, `.htaccess` the full path, and the other
+files are left for review (cron and WP-CLI do not run in that chroot). What still names the old webspace
+afterwards (folders that are not copied, such as `private` or `logs`, PHP-serialized values, chroot cases) is
+listed in `old_path_references` and stops publication for review, like other manual configuration. Edit the
 staged copy, then repeat the command and confirm.
 
 ## One website: domain and client ID

@@ -51,6 +51,7 @@ class HostingServiceProvider extends ServiceProvider
         $this->beforePolicy = new WeakMap;
         $this->mergeConfigFrom(__DIR__.'/../config/web_logs.php', 'web_logs');
         $this->mergeConfigFrom(__DIR__.'/../config/letsencrypt_wait.php', 'letsencrypt_wait');
+        $this->mergeConfigFrom(__DIR__.'/../config/web_php.php', 'web_php');
 
         foreach ([DatabaseOperationService::class, LetsEncryptWaitService::class, WebLogService::class, WebWafService::class, WordPressService::class] as $service) {
             $this->app->scoped($service);
@@ -128,6 +129,8 @@ class HostingServiceProvider extends ServiceProvider
             app(WebWafService::class)->refreshIdentity($site);
             app(LetsEncryptWaitService::class)->siteChanging($site, $action);
             if ($action === 'create') {
+                // Before the product policy's snapshot: removing the policy keeps the website's own settings.
+                app(WebPhpSettingsService::class)->seed($site);
                 $this->beforePolicy[$site] = clone $site;
             }
             app(ClientWebPhpPolicyService::class)->apply($site);

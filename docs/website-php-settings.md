@@ -6,6 +6,16 @@ editable properties documented in `WebPhpSettings.yaml`. It uses the customer's
 normal website permissions and ISPConfig datalog. Raw PHP configuration retains
 its existing administrator-only permissions.
 
+A new website (also a subdomain or alias website with its own folder) starts with
+OPcache off and `short_open_tag` on, written to its own PHP configuration like a
+customer's change, so the customer can switch them in the panel. Only websites
+created with their own `custom_php_ini` (administrator) are left as sent; existing
+websites are not changed. Other on/off defaults in the API's `.env`, e.g.
+`WEB_PHP_NEW_SITE_DEFAULTS={"opcache.enable":"off","short_open_tag":"on","display_errors":"off"}`;
+`{}` leaves new websites on the server's `php.ini`. OPcache stays on in the
+server's `php.ini`: PHP-FPM cannot switch it on for one website when the startup
+configuration disabled it.
+
 The read-only limits are **actual configured values**, not the UI example limits.
 The web log/runtime worker reads the selected server PHP version's root-owned
 `php.ini` and adjacent `conf.d/*.ini`, in lexical order, into an API-owned snapshot.
