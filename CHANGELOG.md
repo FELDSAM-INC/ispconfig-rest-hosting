@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-11-12
+
 ### Changed
 
 - The WAF's outbound rules (OWASP CRS `RESPONSE-95x`: PHP error messages, PHP source code or SQL errors in a page)
@@ -25,6 +27,15 @@ versions follow [Semantic Versioning](https://semver.org/).
   for example, link embedding in the editor (`parse-embed`) and saving a post opened from a filtered post list
   (`referredby`); the newer exclusions also cover the login redirect, search, media captions and plugin zip uploads,
   partly at higher paranoia levels. Plugins are pinned by commit and SHA-256 in `waf-server/crs.json`.
+
+### Upgrade notes
+
+- An install checked out before the history rewrite of 2026-11-09 first re-fetches the tags (see 1.9.0).
+- `ispconfig-rest extension:update hosting --tag v1.10.0 && ispconfig-rest server-tools update --components waf --yes`
+  (every web server with the WAF; it downloads the pinned plugin files from `raw.githubusercontent.com` and rewrites
+  `owasp.conf`). Coming from 1.7.x, also update the migration tool as in 1.8.0. No database migration.
+- Website exceptions for outbound rules (`951…`–`956…`, for example `953100`, `953120`, `951250`) are no longer needed
+  and can be removed in the panel.
 
 ## [1.9.0] - 2026-11-09
 
