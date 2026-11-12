@@ -8,14 +8,16 @@
         "wordpress": {
             "name": "wordpress-rule-exclusions",
             "version": "1.2.0",
+            "commit": "f2e021df311af3d3e1e4d7a89bd729d57ed69807",
             "files": {
-                "wordpress-rule-exclusions-before.conf": "d6bb0e6a2848e6d39e73818537b21058c61a2b80a7b9e0de79fe2b3238eb9076",
-                "wordpress-rule-exclusions-config.conf": "cdffad1a5410057a06cc2ce0489c470f77c69af876d79536f5f34e88c00bced2"
+                "wordpress-rule-exclusions-before.conf": "fb1c1ceaccc91c06b50dcf8139c0ed0fb80cdf8fe94ab2dff1f3fcc5a29b92c7",
+                "wordpress-rule-exclusions-config.conf": "c408582175de34a40a85d09c10f53cdcb8bed7792c37eb8b8036bd6ed570485c"
             }
         },
         "drupal": {
             "name": "drupal-rule-exclusions",
             "version": "1.0.0",
+            "commit": "fa1305127bf70da624a29855857192779db794ce",
             "files": {
                 "drupal-rule-exclusions-before.conf": "1c529d96f4df82bf57edc64ce7541b25923b608d020ebf42fd635d0717d5dcac",
                 "drupal-rule-exclusions-config.conf": "01ee7ff94b101c42dbb7117a73af6d3bc3327fc24a92cd774be3623f45d8df9f"
@@ -24,22 +26,25 @@
         "nextcloud": {
             "name": "nextcloud-rule-exclusions",
             "version": "1.7.1",
+            "commit": "8149d55b74aded565353094e5489e3879f64ae56",
             "files": {
-                "nextcloud-rule-exclusions-before.conf": "5f398812bfec2c9d21dcad3b7898065cdfa4721cdf980bfe487e988cc4729aab",
+                "nextcloud-rule-exclusions-before.conf": "6b5bbcb6e5f11f298985b291299afbe4e5576e974219e405bce77e2b997f3308",
                 "nextcloud-rule-exclusions-config.conf": "17ed8c7826c3351d8f86683a9898b88aca89311fc140f8e319d10c797d5be11a"
             }
         },
         "dokuwiki": {
             "name": "dokuwiki-rule-exclusions",
             "version": "1.0.0",
+            "commit": "753420d1b916b5c76a68861e1f9113b828012237",
             "files": {
-                "dokuwiki-rule-exclusions-before.conf": "ba93cc37f8c6a101b13fa8681eff740fd0c4235a9dcf6a0a1fb63be98dc5aa74",
-                "dokuwiki-rule-exclusions-config.conf": "921dc270f6709e8c27db23b2d845bb8702bf8862584497f4c6a6ee99dab5c762"
+                "dokuwiki-rule-exclusions-before.conf": "e7364c422ea25294d4b5ba0eb792f0690101dd4ecddd1d1b150e47ddbaf189ac",
+                "dokuwiki-rule-exclusions-config.conf": "0836f3d762921cf7f4d48b70461a1eccc155e4e6e453661e7db4bdf5d94462af"
             }
         },
         "cpanel": {
             "name": "cpanel-rule-exclusions",
             "version": "1.0.0",
+            "commit": "91293c412fb9000383dc8c9f2880c0b424a5b52a",
             "files": {
                 "cpanel-rule-exclusions-before.conf": "8433fce90b44fd6adfdda9b68f2cb9d1c8f81c4c26af586eeaf1d0648d510726",
                 "cpanel-rule-exclusions-config.conf": "f4c93c6b8c404237b4ac7a01332476827982216f3e39dbb1f9735045e0cc6ce4"
@@ -47,10 +52,11 @@
         },
         "xenforo": {
             "name": "xenforo-rule-exclusions",
-            "version": "1.0.0",
+            "version": "1.0.1",
+            "commit": "a23a2a59ed6f22183361591906319814e9c61a32",
             "files": {
-                "xenforo-rule-exclusions-before.conf": "f65f5600d9cb2004291013461fd206dd7cf2743398e8e40e5285f0588c0d6df3",
-                "xenforo-rule-exclusions-config.conf": "dcd4091a4b611931715f9b6a4c10a02210d617a810f044ef8e7d16fc9a6b6253"
+                "xenforo-rule-exclusions-before.conf": "6c84fc643f179fc771f7580bbcb0964c8bfa00ddeea4402589785af5ef863e36",
+                "xenforo-rule-exclusions-config.conf": "bfe7def00afcb883b5d751c8940a1b2152d15065f3ace104f1d0afb1fa4cd4dc"
             }
         }
     }

@@ -5,6 +5,20 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The WordPress, Nextcloud, DokuWiki and XenForo application profiles use the official CRS rule exclusions of the
+  upstream main branch instead of the last release tag, which lacks later false-positive fixes (WordPress 1.2.0 is
+  from 2025, DokuWiki and XenForo 1.0.0 from 2024). At the default paranoia level 1, WordPress 1.2.0 still blocked,
+  for example, link embedding in the editor (`parse-embed`) and saving a post opened from a filtered post list
+  (`referredby`); the newer exclusions also cover the login redirect, search, media captions and plugin zip uploads,
+  partly at higher paranoia levels. Plugins are pinned by commit and SHA-256 in `waf-server/crs.json`.
+
+### Changed
+
+- The weekly `crs-update` workflow also moves the rule exclusion plugins to their newest commit that changes their
+  rule files (SHA-256 pins, native Apache and nginx checks, commit to `develop`, issue to release).
+
 ## [1.9.0] - 2026-11-09
 
 ### Added

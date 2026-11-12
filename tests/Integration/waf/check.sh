@@ -95,6 +95,9 @@ for profile in wordpress drupal nextcloud dokuwiki cpanel xenforo none; do
     [[ $(request "/other?$payload") = 403 ]]
     [[ $(request '/wp-json/wp/v2/posts?other=%3Cscript%3Ealert(1)%3C%2Fscript%3E') = 403 ]]
     [[ $(curl -s -o /dev/null -w '%{http_code}' -H 'Host: other.test' "http://127.0.0.1:$port/wp-json/wp/v2/posts?$payload") = 403 ]]
+    # Embedding a link in the editor: excluded only on the plugin's main branch after its 1.2.0 tag (pinned by commit).
+    embed=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: waf.test' --data 'action=parse-embed&shortcode=[embed]https://example.com/[/embed]' "http://127.0.0.1:$port/wp-admin/admin-ajax.php")
+    if [[ "$profile" = wordpress ]]; then [[ "$embed" != 403 ]]; else [[ "$embed" = 403 ]]; fi || { echo "$engine $profile profile: WordPress embed got $embed"; exit 1; }
     echo "PASS $engine application profile $profile: scoped path/argument, other website protected"
 done
 

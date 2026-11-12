@@ -32,8 +32,11 @@ final class WebWafCrsTest extends TestCase
         $manifest = $this->manifest();
         $this->assertMatchesRegularExpression('/\A4\.25\.[0-9]+\z/', $manifest['version']);
         $this->assertSame(array_keys(WebWafProfiles::PLUGINS), array_keys($manifest['plugins']));
-        $this->assertSame('https://raw.githubusercontent.com/coreruleset/wordpress-rule-exclusions-plugin/v1.2.0/plugins/wordpress-rule-exclusions-before.conf',
-            WebWafCrs::pluginUrl('wordpress-rule-exclusions', '1.2.0', 'wordpress-rule-exclusions-before.conf'));
+        // Plugins are pinned by upstream commit: their main branch carries false-positive fixes for months before a tag.
+        $wordpress = $manifest['plugins']['wordpress'];
+        $this->assertMatchesRegularExpression('/\A[0-9a-f]{40}\z/', $wordpress['commit']);
+        $this->assertSame('https://raw.githubusercontent.com/coreruleset/wordpress-rule-exclusions-plugin/'.$wordpress['commit'].'/plugins/wordpress-rule-exclusions-before.conf',
+            WebWafCrs::pluginUrl('wordpress-rule-exclusions', $wordpress['commit'], 'wordpress-rule-exclusions-before.conf'));
     }
 
     public function test_manifest_rejects_other_sources_missing_pins_and_other_plugins(): void
@@ -62,6 +65,26 @@ final class WebWafCrsTest extends TestCase
             },
             function ($m) {
                 $m['plugins']['drupal']['version'] = '1.0.0/../../x';
+
+                return $m;
+            },
+            function ($m) {
+                unset($m['plugins']['drupal']['commit']);
+
+                return $m;
+            },
+            function ($m) {
+                $m['plugins']['drupal']['commit'] = 'main';
+
+                return $m;
+            },
+            function ($m) {
+                $m['plugins']['drupal']['commit'] = strtoupper($m['plugins']['drupal']['commit']);
+
+                return $m;
+            },
+            function ($m) {
+                $m['plugins']['drupal']['commit'] = '../../'.substr($m['plugins']['drupal']['commit'], 6);
 
                 return $m;
             },

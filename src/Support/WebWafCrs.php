@@ -33,7 +33,7 @@ CONF;
      * The manifest, validated strictly: the official release archive and signature, SHA-256 pins, the release key
      * fingerprint, and exactly the plugins of the application profiles.
      *
-     * @return array{version: string, archive: string, sha256: string, signature: string, fingerprint: string, plugins: array<string, array{name: string, version: string, files: array<string, string>}>}
+     * @return array{version: string, archive: string, sha256: string, signature: string, fingerprint: string, plugins: array<string, array{name: string, version: string, commit: string, files: array<string, string>}>}
      */
     public static function manifest(string $json): array
     {
@@ -53,8 +53,10 @@ CONF;
         }
         foreach (WebWafProfiles::PLUGINS as $profile => $name) {
             $plugin = $plugins[$profile];
+            // Upstream fixes false positives on the main branch for months between tags, so a plugin is pinned by commit.
             if (! is_array($plugin) || ($plugin['name'] ?? null) !== $name || ! is_string($plugin['version'] ?? null)
-                || ! preg_match('/\A[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\z/D', $plugin['version'])) {
+                || ! preg_match('/\A[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\z/D', $plugin['version'])
+                || ! is_string($plugin['commit'] ?? null) || ! preg_match('/\A[0-9a-f]{40}\z/D', $plugin['commit'])) {
                 throw new RuntimeException('Invalid CRS manifest plugin '.$profile.'.');
             }
             $files = $plugin['files'] ?? null;
@@ -67,9 +69,9 @@ CONF;
         return $data;
     }
 
-    public static function pluginUrl(string $name, string $version, string $file): string
+    public static function pluginUrl(string $name, string $commit, string $file): string
     {
-        return 'https://raw.githubusercontent.com/coreruleset/'.$name.'-plugin/v'.$version.'/plugins/'.$file;
+        return 'https://raw.githubusercontent.com/coreruleset/'.$name.'-plugin/'.$commit.'/plugins/'.$file;
     }
 
     /** Whether gpgv's machine-readable status reports a good signature by the pinned key, and nothing bad. */
@@ -181,7 +183,7 @@ CONF;
                     if (file_exists($path) || is_link($path)) {
                         throw new RuntimeException('Unexpected OWASP CRS archive content.');
                     }
-                    $fetch(self::pluginUrl($plugin['name'], $plugin['version'], $file), $path);
+                    $fetch(self::pluginUrl($plugin['name'], $plugin['commit'], $file), $path);
                     if (! is_file($path) || is_link($path) || hash_file('sha256', $path) !== $hash) {
                         throw new RuntimeException('The downloaded CRS plugin '.$plugin['name'].' does not match the pinned checksum.');
                     }

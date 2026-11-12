@@ -7,7 +7,7 @@ properties:
   application_profiles:
     type: array
     uniqueItems: true
-    description: Profiles verified by the current webserver worker against its installed CRS 3 rules and managed configuration. Always includes none. Older or unavailable workers expose only none; CRS 4 plugins are not yet supported.
+    description: Profiles verified by the current webserver worker against its installed OWASP CRS 4 rule exclusion plugins and managed configuration. Always includes none. Older or unavailable workers expose only none.
     items: {type: string, enum: [none, wordpress, drupal, nextcloud, dokuwiki, cpanel, xenforo]}
   engine: {type: string, nullable: true, enum: [apache, nginx]}
   rules_version: {type: string, nullable: true}
