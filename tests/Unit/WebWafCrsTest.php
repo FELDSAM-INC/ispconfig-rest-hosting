@@ -235,7 +235,9 @@ final class WebWafCrsTest extends TestCase
         }
         $this->assertStringContainsString('"@streq wordpress" "id:19971,', $lines[3]);
         $this->assertStringContainsString("setvar:'tx.wordpress-rule-exclusions-plugin_enabled=1'", $lines[3]);
-        $this->assertSame(['Include /crs/plugins/*-config.conf', 'Include /crs/plugins/*-before.conf', 'Include /crs/rules/*.conf', 'Include /crs/plugins/*-after.conf'], array_slice($lines, -4));
+        $this->assertSame(['Include /crs/plugins/*-config.conf', 'Include /crs/plugins/*-before.conf', 'Include /crs/rules/*.conf', 'Include /crs/plugins/*-after.conf'], array_slice($lines, -5, 4));
+        // Outbound findings are reported, never blocked: only the two outbound evaluation rules are removed.
+        $this->assertSame('SecRuleRemoveById 959101 959100', end($lines));
         $this->assertSame([], WebWafProfiles::installed($this->root.'/missing.conf', $this->root.'/crs'));
     }
 }

@@ -78,6 +78,22 @@ done
 [[ $(curl -s -o /dev/null -w '%{http_code}' -H 'Host: other.test' "http://127.0.0.1:$port/section/page?$attack") = 403 ]]
 echo "PASS $engine path prefix exception: pages below it only, dot segments and encodings resolved"
 
+# Outbound (response) findings are reported, never blocked: an enforcing website still serves page content that the
+# data-leakage rules match (a PHP code sample: 953120, a shop text: 953100), while attacks in requests stay blocked.
+printf '<pre><?php echo 1; ?></pre><p><b>5</b> in all categories</p>\n' > /tmp/waf-www/code.html
+php /app/tests/Integration/waf/probe.php enforcing
+if [[ "$engine" = apache ]]; then apache2ctl -t; apache2ctl graceful; else nginx -t; nginx -s reload; fi
+sleep .5
+body=$(curl -s -H 'Host: waf.test' "http://127.0.0.1:$port/code.html") || true
+[[ "$body" = "$(cat /tmp/waf-www/code.html)" ]] || { echo "$engine outbound finding blocked the page: $body"; exit 1; }
+sleep .5
+for rule in 953120 953100; do
+    grep -qs "$rule" /var/log/ispconfig-waf/1-*.json || { echo "$engine outbound finding $rule is not in the audit log"; exit 1; }
+done
+if grep -qsE '959100|959101' /var/log/ispconfig-waf/1-*.json; then echo "$engine outbound evaluation still active"; exit 1; fi
+[[ $(request '/code.html?q=1%27%20OR%201%3D1--') = 403 ]]
+echo "PASS $engine outbound findings reported in the audit log, page served, request attacks still blocked"
+
 # Official WordPress Gutenberg exemption must affect only content at its known path.
 mkdir -p /tmp/waf-www/wp-json/wp/v2
 cp /tmp/waf-www/index.html /tmp/waf-www/wp-json/wp/v2/posts

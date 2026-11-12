@@ -5,6 +5,18 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The WAF's outbound rules (OWASP CRS `RESPONSE-95x`: PHP error messages, PHP source code or SQL errors in a page)
+  only report: their findings stay in the audit log and the website's WAF events, but a response is no longer
+  blocked (`959100`/`959101` are removed in the generated `owasp.conf`). On shared hosting they mostly matched
+  ordinary content, for example a PHP code sample in an article (`953120`), a shop text like `<b>5</b> in all`
+  (`953100`) or a `warning` CSS class with `sqlite_` elsewhere in a WordPress admin page (`951250`); Apache answered
+  403 and nginx cut the page off, and the visitors counted towards WAF bans. Website exceptions added for these rules
+  can be removed. Attacks in requests are blocked as before.
+- The weekly `crs-update` workflow also moves the rule exclusion plugins to their newest commit that changes their
+  rule files (SHA-256 pins, native Apache and nginx checks, commit to `develop`, issue to release).
+
 ### Fixed
 
 - The WordPress, Nextcloud, DokuWiki and XenForo application profiles use the official CRS rule exclusions of the
@@ -13,11 +25,6 @@ versions follow [Semantic Versioning](https://semver.org/).
   for example, link embedding in the editor (`parse-embed`) and saving a post opened from a filtered post list
   (`referredby`); the newer exclusions also cover the login redirect, search, media captions and plugin zip uploads,
   partly at higher paranoia levels. Plugins are pinned by commit and SHA-256 in `waf-server/crs.json`.
-
-### Changed
-
-- The weekly `crs-update` workflow also moves the rule exclusion plugins to their newest commit that changes their
-  rule files (SHA-256 pins, native Apache and nginx checks, commit to `develop`, issue to release).
 
 ## [1.9.0] - 2026-11-09
 

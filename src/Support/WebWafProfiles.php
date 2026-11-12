@@ -19,6 +19,9 @@ final class WebWafProfiles
         'xenforo' => 'xenforo-rule-exclusions',
     ];
 
+    /** CRS 4 rules that block a response once the outbound anomaly score reaches its threshold (phase 3 and 4). */
+    public const OUTBOUND_BLOCKING = [959101, 959100];
+
     /** Verified CRS versions live side by side (WebWafCrs); `current` points at the active one. */
     public const ROOT = '/usr/local/share/ispconfig-waf/crs';
 
@@ -43,6 +46,9 @@ final class WebWafProfiles
         foreach (['plugins/*-config.conf', 'plugins/*-before.conf', 'rules/*.conf', 'plugins/*-after.conf'] as $pattern) {
             $lines[] = 'Include '.$crs.'/'.$pattern;
         }
+        // Outbound rules (RESPONSE-95x data leakages) only report: on shared hosting they mostly match ordinary page
+        // content (code samples, shop texts), and nginx can only cut a response off. Their findings stay in the audit.
+        $lines[] = 'SecRuleRemoveById '.implode(' ', self::OUTBOUND_BLOCKING);
 
         return implode("\n", $lines)."\n";
     }
