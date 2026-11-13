@@ -5,6 +5,13 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `ispcp-migrate` creates alias domains and subdomains sharing the website's folder in the website's Let's Encrypt
+  certificate, as the panel does (*Include the alias in the certificate of the main website*). Before, they were
+  left out of it, so HTTPS on an alias such as `example.sk` of `example.com` needed the switch in the panel. ISPConfig
+  leaves out a name whose DNS does not point to the new server yet, and the Let's Encrypt wait adds it later.
+
 ## [1.11.1] - 2026-11-13
 
 ### Fixed

@@ -1942,7 +1942,9 @@ class Migration:
                 'parent_domain_id': site['id'], 'domain': name, 'type': child['type'],
                 'subdomain': child['subdomain'], 'redirect_type': child['redirect_type'],
                 'redirect_path': child['redirect_path'], 'active': child['active'] == 'y',
-                'ssl_letsencrypt_exclude': True,
+                # In the website's Let's Encrypt certificate, as the panel creates them ("Include the alias in the
+                # certificate of the main website"); ISPConfig leaves out names that do not reach the server yet.
+                'ssl_letsencrypt_exclude': False,
             })
             require(alias['parent_domain_id'] == site['id'] and alias['sys_groupid'] == site['sys_groupid']
                     and alias['domain'] == child['domain'], 'Target alias identity changed')

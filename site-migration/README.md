@@ -428,7 +428,9 @@ with its original configuration and state; do not create a new state directory t
   old ISPConfig metadata need separate review; inspect application configs before cutover.
 - Aliases and subdomains sharing the parent vhost are created through the API. Child vhosts with separate
   settings, PostgreSQL, inactive primary websites/databases, and nonstandard website paths stop at planning.
-  Shared-root aliases are excluded from Let's Encrypt initially; review their certificate settings at cutover.
+  Shared-root aliases and subdomains are in the website's Let's Encrypt certificate, as the panel creates them
+  (*Include the alias in the certificate of the main website*); ISPConfig leaves out a name that does not reach
+  the new server when the certificate is issued.
 - `web/` and `private/` are copied including dotfiles. Logs, old TLS keys, backups, jail contents, Linux users,
   vhost directives, custom PHP ini, mailboxes and scheduler settings are not copied. Review old rewrite rules,
   PHP compatibility and any document-root override. Old absolute application paths may need configuration edits.

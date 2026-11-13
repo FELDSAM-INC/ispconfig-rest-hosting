@@ -350,6 +350,9 @@ PY;
         $alias = DB::table('web_domain')->where('type', 'alias')->first();
         $this->assertSame(['shop.example', 'R=301,L', '[scheme]://shop.test/'], [$alias->domain, $alias->redirect_type, $alias->redirect_path]);
         $this->assertSame('same.shop.test', DB::table('web_domain')->where('type', 'subdomain')->value('domain'));
+        // Both are in the website's certificate, as the panel creates them.
+        $this->assertSame(['n', 'n'], DB::table('web_domain')->whereIn('type', ['alias', 'subdomain'])->orderBy('domain_id')
+            ->pluck('ssl_letsencrypt_exclude')->all());
         $blog = DB::table('web_domain')->where('type', 'vhostsubdomain')->first();
         $this->assertSame(['blog.shop.test', 'web/blog', $site->document_root, (int) $site->domain_id],
             [$blog->domain, $blog->web_folder, $blog->document_root, (int) $blog->parent_domain_id]);

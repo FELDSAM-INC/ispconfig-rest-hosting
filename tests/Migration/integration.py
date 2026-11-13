@@ -137,6 +137,7 @@ class FakeApi:
             sql("CREATE DATABASE `%s`; GRANT ALL ON `%s`.* TO '%s'@'localhost';" % (row['database_name_full'], row['database_name_full'], username))
         elif endpoint == '/sites/web-child-domains':
             assert payload['parent_domain_id'] == 104
+            assert payload['ssl_letsencrypt_exclude'] is False, 'An alias belongs in the website certificate, as in the panel'
         else:
             raise AssertionError(endpoint)
         self.rows[endpoint + '/104'] = row
