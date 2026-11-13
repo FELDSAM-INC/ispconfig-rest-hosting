@@ -5,12 +5,21 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.2] - 2026-11-13
+
 ### Fixed
 
 - `ispcp-migrate` creates alias domains and subdomains sharing the website's folder in the website's Let's Encrypt
   certificate, as the panel does (*Include the alias in the certificate of the main website*). Before, they were
   left out of it, so HTTPS on an alias such as `example.sk` of `example.com` needed the switch in the panel. ISPConfig
   leaves out a name whose DNS does not point to the new server yet, and the Let's Encrypt wait adds it later.
+
+### Upgrade notes
+
+- `ispconfig-rest extension:update hosting --tag v1.11.2`, then
+  `ispconfig-rest server-tools update --components migration --server <id>`. No database migration. Aliases migrated
+  before stay out of the certificate; switch on *Include the alias in the certificate of the main website* in the
+  panel.
 
 ## [1.11.1] - 2026-11-13
 
