@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-11-14
+
 ### Changed
 
 - `ispcp-migrate --from plesk example.com CLIENT --subscription` migrates the subscription's other websites
