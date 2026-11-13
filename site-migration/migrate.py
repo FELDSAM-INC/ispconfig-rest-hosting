@@ -637,6 +637,25 @@ def plesk_site(rows, domain):
     return site
 
 
+def plesk_php_request(rows, inventory):
+    """The website and its subdomains with their own folder, with their Plesk PHP handlers, for their PHP settings."""
+    handlers = {str(row['name']).lower(): row.get('php_handler') for row in plesk_rows(rows).get('domain', [])}
+    names = [inventory['site']['domain']] + [child['domain'] for child in inventory['children'] if child['type'] == 'vhostsubdomain']
+    return {'action': 'php', 'domains': [{'name': name, 'handler': handlers.get(name)} for name in names]}
+
+
+def plesk_opcache(result):
+    """OPcache per domain as Plesk runs it: 'on', 'off' or None when Plesk does not tell."""
+    domains = result.get('domains') if isinstance(result, dict) else None
+    require(isinstance(domains, dict), 'The Plesk PHP settings could not be read')
+    return {str(name): value.get('opcache') if isinstance(value, dict) and value.get('opcache') in ('on', 'off') else None
+            for name, value in domains.items()}
+
+
+def opcache_text(value):
+    return {'on': 'on, as in Plesk', 'off': 'off, as in Plesk'}.get(value, 'on (Plesk does not tell)')
+
+
 def plesk_inventory(rows, account, domain, databases=None):
     """Plesk metadata in the migration's inventory format: the website, its databases, aliases, subdomains and cron.
 
@@ -1197,7 +1216,10 @@ class Migration:
             rows = json.loads(self.plesk({'action': 'inventory'}))['rows']
             site = plesk_site(rows, self.domain)
             account = json.loads(self.plesk({'action': 'account', 'login': site['login'], 'home': site['home'].rstrip('/')}))
-            return plesk_inventory(rows, account, self.domain, self.databases)
+            inventory = plesk_inventory(rows, account, self.domain, self.databases)
+            # Outside the site and children that identify created objects: a later change in Plesk is taken over.
+            inventory['opcache'] = plesk_opcache(json.loads(self.plesk(plesk_php_request(rows, inventory))))
+            return inventory
         inventory = json.loads(execute(php_remote(self.source['panel_ssh'], 'source-inventory.php'),
                                        data=(json.dumps({'domain': self.domain}) + '\n').encode(),
                                        error_path=self.directory / 'source-inventory.log'))
@@ -1502,6 +1524,12 @@ class Migration:
             print('Source PHP: %s (%s)%s' % (site['php_version'] or 'unknown', site['php_handler'],
                                              '; the same on the new website' if site['php_version'] and php['version'] == site['php_version']
                                              else hint))
+            if 'opcache' in inventory:
+                own = {child['domain']: inventory['opcache'].get(child['domain']) for child in inventory['children']
+                       if child['type'] == 'vhostsubdomain'}
+                differ = ['%s %s' % (name, opcache_text(value)) for name, value in sorted(own.items())
+                          if (value != 'off') != (inventory['opcache'].get(self.domain) != 'off')]
+                print('OPcache: ' + opcache_text(inventory['opcache'].get(self.domain)) + ('; ' + '; '.join(differ) if differ else ''))
         print('Destination web access: ' + ('local (no SSH)' if self.local_web else 'SSH'))
         print('Website disk quota: %s (source files %d MB)' % (mb(quotas['disk_mb']), -(-sizes['web_bytes'] // MB)))
         print('Website traffic quota: ' + mb(quotas['traffic_mb']))
@@ -1560,7 +1588,7 @@ class Migration:
         else:
             print('DNS zones: not created (--no-dns)')
         print('WHMCS product/Create, mail, the DNS switch and certificates remain operator steps; '
-              'PHP settings of the Plesk domain are not copied.')
+              'PHP settings of the Plesk domain other than its version and OPcache are not copied.')
 
     # --- DNS zones (Plesk) ----------------------------------------------------------------------
     def hosting_addresses(self):
@@ -1832,6 +1860,7 @@ class Migration:
                 and site['system_group'] == 'client' + str(self.client_id), 'Target website identity changed')
         self.site = site
         self.check_target()
+        self.take_over_opcache(site['id'], self.domain)
         for child in self.state['inventory']['children']:
             name = child['domain']
             if child['type'] == 'vhostsubdomain':
@@ -1844,6 +1873,7 @@ class Migration:
                 record = self.create('child:' + str(child['domain_id']), '/sites/web-domains', payload)
                 require(record['parent_domain_id'] == site['id'] and record['domain'] == name and record['web_folder'] == child['web_folder']
                         and record['document_root'] == site['document_root'], 'Target subdomain identity changed')
+                self.take_over_opcache(record['id'], name)
                 continue
             if child['type'] == 'subdomain':
                 require(name.endswith('.' + self.domain), 'Source subdomain does not match parent')
@@ -1917,6 +1947,28 @@ class Migration:
             # The transport executes our local helper directly, with no SSH/socket.
             return RSYNC_BASE + ['-e', shlex.join(self.files_command() + ['--local-rsync'])], 'local:'
         return RSYNC + ['--rsync-path=' + shlex.join(self.files_command())], self.target['web_ssh'] + ':'
+
+    def take_over_opcache(self, record_id, name):
+        """OPcache of a new website as Plesk ran it, on when Plesk does not tell: new websites start with the server's
+        defaults (OPcache off by default), and a website that ran with it can exceed its memory limit without. Once per
+        website, so a change made in the panel between sync rounds stays."""
+        opcache = self.state['inventory'].get('opcache')
+        if self.kind != 'plesk' or opcache is None or str(record_id) in self.state.get('opcache', {}):
+            return
+        done = self.state.setdefault('opcache', {})
+        wanted = 'off' if opcache.get(name) == 'off' else 'on'
+        settings = self.api.get('/sites/web-domains/%d' % record_id).get('php_settings') or {}
+        if (settings.get('values') or {}).get('opcache.enable') == wanted:
+            done[str(record_id)] = wanted
+        elif 'opcache.enable' in (settings.get('editable') or []):
+            self.api.request('PUT', '/sites/web-domains/%d' % record_id, {'php_settings': {'opcache.enable': wanted == 'on'}})
+            done[str(record_id)] = wanted
+        else:
+            # Not recorded: the next run tries again (the web server's PHP defaults may not have been measured yet).
+            print("MANUAL OPcache of %s was %s in Plesk, but the new web server does not let it change now: set it in the panel's "
+                  'PHP settings.' % (name, wanted), flush=True)
+            return
+        self.save()
 
     def check_target(self):
         self.check_web_server()

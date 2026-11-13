@@ -687,6 +687,56 @@ class PleskTests(unittest.TestCase):
                                                       r'does not offer: .*available: PHP 7.4.*--php VERSION'):
             migration.select_php()
 
+    def test_plesk_opcache_is_read_for_the_website_and_its_own_folder_subdomains(self):
+        request = m.plesk_php_request(PLESK_ROWS, self.inventory())
+        self.assertEqual({'action': 'php', 'domains': [{'name': 'shop.test', 'handler': 'alt-php81-fpm'},
+                                                       {'name': 'blog.shop.test', 'handler': 'alt-php74-fpm'}]}, request)
+        self.assertEqual({'shop.test': 'on', 'blog.shop.test': 'off', 'x.test': None},
+                         m.plesk_opcache({'domains': {'shop.test': {'opcache': 'on', 'from': 'handler'}, 'blog.shop.test': {'opcache': 'off'},
+                                                      'x.test': {'opcache': 'maybe'}}}))
+        with self.assertRaisesRegex(m.MigrationError, 'PHP settings could not be read'):
+            m.plesk_opcache({})
+
+    def test_plesk_source_reads_opcache_like_php(self):
+        spec = importlib.util.spec_from_file_location('plesk_source', TOOLS / 'plesk-source.py')
+        source = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(source)
+        self.assertEqual(('off', False), source.ini_settings('[PHP]\nopcache.enable = 0 ; comment\n'))
+        self.assertEqual(('on', True), source.ini_settings('zend_extension=/opt/alt/php81/usr/lib64/php/modules/opcache.so\n'
+                                                           'opcache.enable = "On"\n[PATH=/var/www/x]\nopcache.enable = off\n'))
+        self.assertEqual((None, True), source.ini_settings('zend_extension = opcache\n;opcache.enable=0\n'))
+        self.assertEqual((None, False), source.ini_settings('extension=opcache_helper.so\nzend_extension=xdebug.so\n'))
+
+    def test_new_websites_take_over_the_opcache_of_plesk_once(self):
+        migration = object.__new__(m.Migration)
+        migration.kind = 'plesk'
+        migration.save = MagicMock()
+        migration.state = {'inventory': {'opcache': {'shop.test': None, 'blog.shop.test': 'off'}}}
+        migration.api = MagicMock()
+        migration.api.get.return_value = {'php_settings': {'values': {'opcache.enable': 'off'}, 'editable': ['opcache.enable']}}
+        migration.take_over_opcache(104, 'shop.test')  # Plesk does not tell: on, as the website ran on a server with it
+        migration.api.request.assert_called_once_with('PUT', '/sites/web-domains/104', {'php_settings': {'opcache.enable': True}})
+        migration.take_over_opcache(105, 'blog.shop.test')
+        self.assertEqual(1, migration.api.request.call_count, 'already off')
+        self.assertEqual({'104': 'on', '105': 'off'}, migration.state['opcache'])
+        migration.take_over_opcache(104, 'shop.test')
+        self.assertEqual(2, migration.api.get.call_count, 'once per website: a later change in the panel stays')
+        # Not changeable now (the server's PHP defaults are not measured yet): reported, and tried again by the next run.
+        migration.api.get.return_value = {'php_settings': {'values': {'opcache.enable': 'off'}, 'editable': []}}
+        with patch('sys.stdout', new_callable=io.StringIO) as output:
+            migration.take_over_opcache(106, 'shop.test')
+        self.assertIn('MANUAL OPcache of shop.test was on in Plesk', output.getvalue())
+        self.assertNotIn('106', migration.state['opcache'])
+        # Other sources, and migrations planned before Plesk OPcache was read, keep the new-site defaults.
+        migration.api.reset_mock()
+        migration.state = {'inventory': {}}
+        migration.take_over_opcache(107, 'shop.test')
+        migration.kind = 'ispconfig'
+        migration.state = {'inventory': {'opcache': {'shop.test': 'on'}}}
+        migration.take_over_opcache(107, 'shop.test')
+        migration.api.get.assert_not_called()
+        self.assertNotIn('opcache', migration.state)
+
     def test_cron_jobs_map_webspace_paths_and_list_the_rest_for_review(self):
         jobs = {job['source']: job for job in self.inventory()['cron']}
         client = {'limit_cron_type': 'full', 'limit_cron_frequency': 5}

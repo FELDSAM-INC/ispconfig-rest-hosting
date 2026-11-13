@@ -1,7 +1,7 @@
 """Runs as root on a Plesk (Linux) server through root SSH; Python 3.6 compatible (CloudLinux/RHEL 8 python3).
 
 Read-only. Plesk metadata comes from `plesk db` SELECT statements, the website owner's account from the
-system databases. Files are measured as the subscription's system user, never as root, so a customer
+system databases, PHP settings from the root-owned php.ini files Plesk generates and the PHP handlers' own ones. Files are measured as the subscription's system user, never as root, so a customer
 symlink cannot point root at other files. Database dumps run as the Plesk administrator with the password
 passed through a pipe: nothing is written on the Plesk server. The request is one JSON line on stdin.
 """
@@ -40,6 +40,9 @@ DNS = ("SELECT JSON_OBJECT('t','zone','id',z.id,'name',z.name,'status',z.status,
 ADDRESSES = "SELECT JSON_OBJECT('t','ip','address',i.ip_address) FROM IP_Addresses i"
 DATABASE = re.compile(r'[A-Za-z0-9_-]{1,64}\Z')
 LOGIN = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}\Z')
+DOMAIN = re.compile(r'(?=.{1,253}\Z)[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?(?:\.[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?)+\Z')
+HANDLER = re.compile(r'(alt|plesk)-php([0-9])([0-9]+)-[a-z-]+\Z')
+INI_OFF = ('0', 'off', 'no', 'false', 'none', '')
 
 
 def fail(message):
@@ -112,6 +115,89 @@ def size(request):
     return {'paths': sizes, 'databases': databases}
 
 
+def root_text(path):
+    """A configuration file only root can change (no symlink for the per-domain file), or None."""
+    try:
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode):
+            info = os.stat(path)
+            if not path.startswith('/opt/'):
+                return None
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 or info.st_size > 1048576:
+            return None
+        with open(path, 'rb') as handle:
+            return handle.read().decode('utf-8', 'replace')
+    except OSError:
+        return None
+
+
+def ini_settings(text):
+    """The opcache.enable value and whether the OPcache extension is loaded, outside [PATH=]/[HOST=] sections."""
+    enable, loaded, scoped = None, False, False
+    for line in text.splitlines():
+        line = line.split(';', 1)[0].strip()
+        if line.startswith('['):
+            scoped = line[1:].upper().startswith(('PATH=', 'HOST='))
+            continue
+        if scoped or '=' not in line:
+            continue
+        key, value = (part.strip() for part in line.split('=', 1))
+        value = value.strip('"\'').strip().lower()
+        if key == 'opcache.enable':
+            enable = 'off' if value in INI_OFF else 'on'
+        elif key == 'zend_extension' and re.search(r'(?:^|/)opcache(?:\.so)?\Z', value):
+            loaded = True
+    return enable, loaded
+
+
+def opcache(name, handler):
+    """OPcache of a domain as Plesk runs it: its generated php.ini (the panel's PHP settings of the server, plan,
+    subscription and domain), else the handler's own configuration (PHP turns a loaded OPcache on by default)."""
+    domain = root_text('/var/www/vhosts/system/%s/etc/php.ini' % name)
+    if domain is not None:
+        enable, _ = ini_settings(domain)
+        if enable is not None:
+            return {'opcache': enable, 'from': 'domain'}
+    match = HANDLER.match(handler or '')
+    if not match:
+        return {'opcache': None, 'from': None}
+    kind, major, minor = match.groups()
+    if kind == 'alt':
+        directory, files = '/opt/alt/php%s%s/link/conf' % (major, minor), []
+    else:
+        directory = '/opt/plesk/php/%s.%s/etc/php.d' % (major, minor)
+        files = ['/opt/plesk/php/%s.%s/etc/php.ini' % (major, minor)]
+    try:
+        files += [directory + '/' + entry for entry in sorted(os.listdir(directory)) if entry.endswith('.ini')]
+    except OSError:
+        return {'opcache': None, 'from': None}
+    enable, loaded, read = None, False, False
+    for path in files:
+        text = root_text(path)
+        if text is None:
+            continue
+        read = True
+        value, extension = ini_settings(text)
+        enable = value if value is not None else enable
+        loaded = loaded or extension
+    if not read:
+        return {'opcache': None, 'from': None}
+    return {'opcache': (enable or 'on') if loaded else 'off', 'from': 'handler'}
+
+
+def php(request):
+    domains = request['domains']
+    if not isinstance(domains, list) or len(domains) > 200:
+        fail('Invalid domains')
+    result = {}
+    for entry in domains:
+        name, handler = entry['name'], entry.get('handler')
+        if not isinstance(name, str) or not DOMAIN.match(name) or not (handler is None or isinstance(handler, str) and len(handler) <= 64):
+            fail('Invalid domain')
+        result[name] = opcache(name, handler)
+    return {'domains': result}
+
+
 def dump(request):
     name = request['database']
     if not DATABASE.match(name):
@@ -150,6 +236,8 @@ def main():
         result = account(request)
     elif action == 'size':
         result = size(request)
+    elif action == 'php':
+        result = php(request)
     elif action == 'dns':
         zones = request['zones']
         if not isinstance(zones, list) or not all(type(zone) is int and zone > 0 for zone in zones):

@@ -5,6 +5,15 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `ispcp-migrate --from plesk` gives the new website, and each subdomain with its own folder, OPcache as Plesk ran
+  it, read from the domain's generated `php.ini` or, when that does not set it, from the PHP handler's configuration
+  (on when Plesk does not tell). Since 1.8.0 migrated websites started with the new-site default OPcache off, and a
+  WordPress site with many plugins then needed 127 MB instead of 46 MB for its homepage, exceeded the 128 MB memory
+  limit and answered 503. The plan shows the setting; it is applied once through the website's PHP settings, so a
+  change made in the panel stays during sync rounds.
+
 ## [1.10.0] - 2026-11-12
 
 ### Changed

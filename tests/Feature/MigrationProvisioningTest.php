@@ -297,6 +297,8 @@ PY;
                     'php_version' => '7.4', 'redirect_type' => '', 'redirect_path' => '', 'active' => 'y'],
             ],
             'cron' => [], 'notes' => [], 'not_copied' => [], 'servers' => [],
+            // OPcache as Plesk runs it (plesk-source.py): the website with it, the blog without.
+            'opcache' => ['shop.test' => 'on', 'blog.shop.test' => 'off'],
         ];
         $request['cron_jobs'] = $cronJobs;
 
@@ -319,6 +321,10 @@ PY;
             'reason' => 'shell syntax', 'create' => false, 'type' => 'full', 'php_cli' => '/usr/bin/php'];
         // The website (alt-php81-fpm) and its subdomain with its own folder (alt-php74-fpm) keep their Plesk PHP versions.
         $php = $this->phpVersions([['PHP 8.1', '8.1', 'y', 0], ['PHP 7.4', '7.4', 'y', 0], ['PHP 8.3', '8.3', 'y', 0]]);
+        foreach ($php as $id) {
+            DB::table('api_web_php_defaults')->insert(['server_id' => 1, 'server_php_id' => $id, 'mode' => 'fpm', 'measured_at' => time(),
+                'settings' => json_encode(['opcache' => true, 'scan' => [], 'values' => ['opcache.enable' => 'on', 'disable_functions' => '']])]);
+        }
         [$result, $calls] = $this->runMigration($this->pleskMigration([$wpCron, $fetch, $manual]));
         $this->assertTrue($result['ok'], $result['error'] ?? '');
         $this->assertSame(['version' => '8.1', 'server_php_id' => $php['8.1'], 'source' => 'plesk'], $result['state']['php']);
@@ -326,14 +332,21 @@ PY;
         $this->assertSame($php['8.1'], (int) DB::table('web_domain')->where('type', 'vhost')->value('server_php_id'));
         $this->assertSame($php['7.4'], (int) DB::table('web_domain')->where('type', 'vhostsubdomain')->value('server_php_id'));
         $key = $result['state']['client_key']['id'];
+        $siteId = (int) DB::table('web_domain')->where('type', 'vhost')->value('domain_id');
         $this->assertSame([
             'POST /system/api-keys 201', 'PUT /system/api-keys/'.$key.' 200', 'POST /sites/web-domains 201',
-            'POST /sites/web-child-domains 201', 'POST /sites/web-child-domains 201', 'POST /sites/web-domains 201',
+            'PUT /sites/web-domains/'.$siteId.' 200', 'POST /sites/web-child-domains 201', 'POST /sites/web-child-domains 201', 'POST /sites/web-domains 201',
             'POST /sites/database-users 201', 'POST /sites/databases 201', 'POST /sites/database-users 201', 'POST /sites/databases 201',
             'POST /sites/cron-jobs 201', 'POST /sites/cron-jobs 201', 'PUT /system/api-keys/'.$key.' 200',
         ], $this->writes($calls));
         $site = DB::table('web_domain')->where('type', 'vhost')->first();
         $this->assertSame(['shop.test', '*'], [$site->domain, $site->subdomain]);
+        // OPcache as in Plesk, with the client's key like the panel: on for the website, the blog keeps the new-site default.
+        $this->assertStringContainsString("opcache.enable = on\n", $site->custom_php_ini);
+        $this->assertStringNotContainsString('opcache.enable = off', $site->custom_php_ini);
+        $this->assertStringContainsString('opcache.enable = off', DB::table('web_domain')->where('type', 'vhostsubdomain')->value('custom_php_ini'));
+        $this->assertSame([(string) $siteId => 'on', (string) DB::table('web_domain')->where('type', 'vhostsubdomain')->value('domain_id') => 'off'],
+            $result['state']['opcache']);
         $alias = DB::table('web_domain')->where('type', 'alias')->first();
         $this->assertSame(['shop.example', 'R=301,L', '[scheme]://shop.test/'], [$alias->domain, $alias->redirect_type, $alias->redirect_path]);
         $this->assertSame('same.shop.test', DB::table('web_domain')->where('type', 'subdomain')->value('domain'));

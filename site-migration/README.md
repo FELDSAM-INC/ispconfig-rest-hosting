@@ -212,6 +212,9 @@ The Plesk server needs only its own `python3` (CloudLinux/RHEL 8 `platform-pytho
 - Plesk's metadata comes from `plesk db` **SELECT** statements (domains, hosting, aliases, databases and their
   users, IP addresses, 30-day traffic, DNS zones and records). The Plesk REST API would need a key created on the server and lacks the
   PHP handler, the system user and the traffic; the CLI utilities print text only.
+- OPcache is read from the root-owned `php.ini` Plesk generates per domain (`/var/www/vhosts/system/<domain>/etc/php.ini`,
+  the PHP settings of the server, service plan, subscription and domain) and, when it does not set it, from the PHP
+  handler's own configuration (`/opt/alt/phpXY/link/conf`, `/opt/plesk/php/X.Y/etc`).
 - Files and sizes are read **as the subscription's system user** (`setpriv`), so a symlink a customer places in the
   webspace cannot make root read other files. A file that user cannot read stops the copy.
 - Databases are dumped as the Plesk administrator (`/etc/psa/.psa.shadow`); the password reaches `mysqldump` through
@@ -236,6 +239,7 @@ What is migrated, per Plesk domain with website hosting (a suspended or disabled
 | Local MySQL/MariaDB databases Plesk assigns to the domain | New databases and users; WordPress configs using any of the database's Plesk users are updated |
 | Cron jobs of the subscription's system user | ISPConfig cron jobs, created **inactive** |
 | PHP version of the domain and of each subdomain with its own folder (`alt-php74-fpm` → 7.4) | The same PHP version on the new web server |
+| OPcache of the domain and of each subdomain with its own folder | The same in the website's PHP settings (on when Plesk does not tell) |
 | DNS zones of the domain, its aliases and subdomains that public DNS delegates to Plesk | DNS zones of the client on its DNS server, see below |
 
 The plan lists everything else: subdomains or additional domains of the subscription with their own folder
@@ -243,8 +247,15 @@ The plan lists everything else: subdomains or additional domains of the subscrip
 forwarding subdomains, files of the webspace outside the document root (e.g. `wordpress-backups`), and databases
 assigned to another domain of the subscription. Plesk often assigns all databases to the subscription's main
 domain: `--database NAME` (repeatable) migrates exactly these databases of the subscription instead, e.g. the one an
-additional domain's WordPress uses. Per-domain PHP settings, mail, certificates and Plesk extensions (WP Toolkit,
+additional domain's WordPress uses. Other per-domain PHP settings, mail, certificates and Plesk extensions (WP Toolkit,
 Imunify) are not migrated.
+
+**OPcache.** New websites start with the API's new-site PHP defaults, which switch OPcache off; a website that ran
+with OPcache needs much more memory without it (a WordPress homepage went from 46 MB to 127 MB and hit the 128 MB
+limit). The migrated website and its subdomains with their own folder therefore get OPcache as Plesk ran them, set
+through the website's PHP settings like a change in the panel, once: a later change in the panel stays during sync
+rounds. When the new web server does not let it change (its PHP defaults are not measured yet, or its `php.ini`
+switches OPcache off), the run prints a MANUAL line and tries again on the next run.
 
 **PHP version.** The new website gets the PHP version of the Plesk domain, read from its handler (`alt-php74-fpm` or
 `plesk-php82-fpm` → 7.4 / 8.2) and looked up like `--php` below. When the new web server does not offer that

@@ -186,15 +186,25 @@ PLESK_SHADOW = '$AES-128-CBC$Zm9v+YmFy/w==$cXV4'
 
 
 class PleskFakeApi(FakeApi):
-    """The target contract of FakeApi plus subdomains with their own folder, cron jobs and the client's plan."""
+    """The target contract of FakeApi plus subdomains with their own folder, cron jobs, PHP settings and the client's plan."""
     next_id = 105
+    php_puts = []
 
     def get(self, path):
         if path == '/clients/3':
             return dict(super().get(path), limit_wildcard=True, limit_cron_type='full', limit_cron_frequency=5)
-        return super().get(path)
+        row = super().get(path)
+        if path.startswith('/sites/web-domains/'):
+            # New websites start with OPcache off (the API's new-site defaults).
+            return dict(row, php_settings={'values': {'opcache.enable': row.get('opcache', 'off')}, 'editable': ['opcache.enable']})
+        return row
 
     def request(self, method, endpoint, payload):
+        if method == 'PUT' and endpoint.startswith('/sites/web-domains/'):
+            assert self.key == 'test-scoped-key' and list(payload) == ['php_settings'], payload
+            PleskFakeApi.php_puts.append((endpoint, payload))
+            self.rows[endpoint]['opcache'] = 'on' if payload['php_settings']['opcache.enable'] else 'off'
+            return self.rows[endpoint], None
         if method == 'POST' and (endpoint == '/sites/cron-jobs' or endpoint == '/sites/web-domains' and payload.get('type') == 'vhostsubdomain'):
             assert self.key == 'test-scoped-key'
             self.posts += 1
@@ -335,6 +345,12 @@ def plesk_fixture():
                "#@desc: Feed import\n7,37\t*\t*\t*\t*\t/opt/alt/php81/usr/bin/php -f 'httpdocs/feed.php'\n"
                '0 * * * * php %s/addon.test/cron.php\n' % PLESK_HOME)
     subprocess.run(['crontab', '-u', 'shopuser', '-'], input=crontab.encode(), check=True)
+    # PHP settings: the website's php.ini leaves OPcache to alt-php81, which loads it; the blog switched it off in Plesk.
+    for path, text in ((Path('/opt/alt/php81/link/conf/default.ini'), 'zend_extension=/opt/alt/php81/usr/lib64/php/modules/opcache.so\n'),
+                       (Path('/var/www/vhosts/system/shop.test/etc/php.ini'), '[PHP]\nmemory_limit = 128M\n'),
+                       (Path('/var/www/vhosts/system/blog.shop.test/etc/php.ini'), '[PHP]\nopcache.enable = off\n')):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
 
 
 def plesk_main():
@@ -381,6 +397,7 @@ def plesk_main():
         assert inventory['site']['subdomain'] == '*' and inventory['site']['system_user'] == 'shopuser'
         assert [(child['domain'], child['type']) for child in inventory['children']] == [('blog.shop.test', 'vhostsubdomain'), ('shop.example', 'alias')]
         assert inventory['not_copied'] == ['private-data'], inventory['not_copied']
+        assert inventory['opcache'] == {'shop.test': 'on', 'blog.shop.test': 'off'}, inventory['opcache']
         assert [job['source'] for job in migration.state['cron_jobs']] == ["/opt/alt/php81/usr/bin/php -f 'httpdocs/feed.php'"]
         assert any(note.startswith('WordPress cron (WP Toolkit, 1 job(s)') for note in inventory['notes']), inventory['notes']
         sizes = migration.state['source_size']
@@ -452,6 +469,9 @@ def plesk_main():
         assert [(row['command'], row['active'], row['run_min']) for row in cron] == [
             ('/usr/bin/php8.1 -f %s/web/feed.php' % target_root, False, '7,37')], cron
         assert (site['server_php_id'], blog[0]['server_php_id']) == (31, 31), 'PHP 8.1 as on Plesk'
+        # OPcache as in Plesk: switched on where the new-site defaults turned it off; the blog keeps it off.
+        assert PleskFakeApi.php_puts == [('/sites/web-domains/104', {'php_settings': {'opcache.enable': True}})], PleskFakeApi.php_puts
+        assert migration.state['opcache'] == {'104': 'on', str(blog[0]['id']): 'off'}, migration.state['opcache']
         # Final sync: new source rows and files, deleted files; the reviewed path is checked again.
         sql("INSERT INTO shop_wp.items VALUES (2, 'new');")
         (PLESK_HOME / 'httpdocs/delete-on-sync.txt').unlink()
@@ -471,6 +491,7 @@ def plesk_main():
         assert sql('SELECT COUNT(*) FROM `%s`.items' % wp['name']) == '2'
         assert not (target_root / 'web/delete-on-sync.txt').exists() and (target_root / 'web/new.txt').read_text() == 'new file'
         assert FakeApi.posts == posts, 'sync must not create objects again'
+        assert len(PleskFakeApi.php_puts) == 1, 'a change made in the panel between rounds stays'
         assert [job['source'] for job in migration.state['cron_jobs']] == ["/opt/alt/php81/usr/bin/php -f 'httpdocs/feed.php'"]
         assert 'old secret' not in (Path(state) / 'state.json').read_text()
     public.close()
