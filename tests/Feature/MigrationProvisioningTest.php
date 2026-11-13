@@ -211,7 +211,8 @@ PY;
         [$result, $calls] = $this->runMigration($this->migration(['app' => 100 * self::MB, 'shop' => 300 * self::MB]));
         $this->assertTrue($result['ok'], $result['error'] ?? '');
         $site = DB::table('web_domain')->where('type', 'vhost')->first();
-        $this->assertSame([5120, 20480], [(int) $site->hd_quota, (int) $site->traffic_quota]);
+        // Twice the 800 MB of files, the rest of the client's 5120 MB stays free for other websites; all the traffic.
+        $this->assertSame([1600, 20480], [(int) $site->hd_quota, (int) $site->traffic_quota]);
         $this->assertSame('migrated-alias.test', DB::table('web_domain')->where('type', 'alias')->value('domain'));
         // 1024 MB split by source size 100:300.
         $this->assertSame([256, 768], DB::table('web_database')->orderBy('database_id')->pluck('database_quota')->map(fn ($v) => (int) $v)->all());
@@ -394,53 +395,6 @@ PY;
         [$refused, $calls] = $this->runMigration($this->pleskMigration([$wpCron, $fetch]));
         $this->assertFalse($refused['ok']);
         $this->assertStringStartsWith('Client limit for cron jobs is too small: limit 1, used 0, migration needs 2 more.', $refused['error']);
-        $this->assertSame([], $this->writes($calls));
-    }
-
-    public function test_a_whole_plesk_subscription_gets_its_domains_with_their_own_folder_and_php(): void
-    {
-        foreach (['limit_web_aliasdomain' => 3, 'limit_web_subdomain' => 2, 'limit_database' => 2, 'limit_database_user' => 2] as $limit => $value) {
-            $this->setClientLimit('clientB', $limit, $value);
-        }
-        DB::table('client')->where('client_id', $this->tenant('clientB')['client_id'])->update(['limit_wildcard' => 'y']);
-        $php = $this->phpVersions([['PHP 8.1', '8.1', 'y', 0], ['PHP 7.4', '7.4', 'y', 0], ['PHP 8.3', '8.3', 'y', 0]]);
-        foreach ($php as $id) {
-            DB::table('api_web_php_defaults')->insert(['server_id' => 1, 'server_php_id' => $id, 'mode' => 'fpm', 'measured_at' => time(),
-                'settings' => json_encode(['opcache' => true, 'scan' => [], 'values' => ['opcache.enable' => 'on', 'disable_functions' => '']])]);
-        }
-        $request = $this->pleskMigration([]);
-        // --subscription: an additional domain with its own Plesk folder and a domain inside it (plesk_inventory).
-        $request['inventory']['children'][] = ['domain_id' => 'd7', 'domain' => 'addon.test', 'type' => 'vhostalias', 'subdomain' => 'www',
-            'web_folder' => 'addon.test', 'php_version' => '8.3', 'redirect_type' => '', 'redirect_path' => '', 'active' => 'y',
-            'www_root' => '/var/www/vhosts/shop.test/addon.test'];
-        $request['inventory']['children'][] = ['domain_id' => 'd11', 'domain' => 'blog.addon.test', 'type' => 'vhostalias', 'subdomain' => 'www',
-            'web_folder' => 'addon.test/blog', 'php_version' => '8.1', 'redirect_type' => '', 'redirect_path' => '', 'active' => 'y'];
-        $request['inventory']['opcache'] += ['addon.test' => 'off', 'blog.addon.test' => 'on'];
-        [$result, $calls] = $this->runMigration($request);
-        $this->assertTrue($result['ok'], $result['error'] ?? '');
-        $this->assertSame(['s3' => ['version' => '7.4', 'server_php_id' => $php['7.4']], 'd7' => ['version' => '8.3', 'server_php_id' => $php['8.3']]],
-            $result['state']['php_children']);
-        $site = DB::table('web_domain')->where('type', 'vhost')->first();
-        $domains = DB::table('web_domain')->where('type', 'vhostalias')->orderBy('domain_id')->get();
-        $this->assertSame([
-            ['addon.test', 'addon.test', $site->document_root, (int) $site->domain_id, $php['8.3'], 'www', 'n'],
-            ['blog.addon.test', 'addon.test/blog', $site->document_root, (int) $site->domain_id, $php['8.1'], 'www', 'n'],
-        ], $domains->map(fn ($row) => [$row->domain, $row->web_folder, $row->document_root, (int) $row->parent_domain_id,
-            (int) $row->server_php_id, $row->subdomain, $row->ssl])->all());
-        // Each keeps its OPcache from Plesk, as the panel sets it.
-        $this->assertStringContainsString('opcache.enable = off', $domains[0]->custom_php_ini);
-        $this->assertStringContainsString("opcache.enable = on\n", $domains[1]->custom_php_ini);
-        $this->assertStringContainsString($site->document_root.'/addon.test', $domains[0]->php_open_basedir);
-        $this->assertSame(4, collect($this->writes($calls))->filter(fn ($write) => $write === 'POST /sites/web-domains 201')->count());
-
-        // Alias domains with their own folder count against the client's alias limit before any write.
-        DB::table('web_domain')->delete();
-        DB::table('web_database')->delete();
-        DB::table('web_database_user')->delete();
-        $this->setClientLimit('clientB', 'limit_web_aliasdomain', 2);
-        [$refused, $calls] = $this->runMigration($request);
-        $this->assertFalse($refused['ok']);
-        $this->assertStringStartsWith('Client limit for alias domains is too small: limit 2, used 0, migration needs 3 more.', $refused['error']);
         $this->assertSame([], $this->writes($calls));
     }
 

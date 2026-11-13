@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Focused offline tests; integration coverage lives in integration.py."""
 import base64
+import contextlib
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -80,6 +82,31 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(m.MigrationError):
             m.available_traffic_mb(self.summary(traffic=0), 6)
 
+    def test_new_objects_get_twice_their_size_and_leave_the_rest_for_other_websites(self):
+        self.assertEqual((1024, 1600, 1), (m.reserved_mb(1), m.reserved_mb(800 * 1048576), m.size_mb(1)))
+        migration = self.migration()  # 800 MB of files, a 40 MB database
+        quotas = migration.allocation(self.summary(disk=20480, database=4096))
+        self.assertEqual({'disk_mb': 1600, 'traffic_mb': -1, 'databases_mb': {'c57shop': 1024}}, quotas)
+        # A tight client quota: what is left after the other websites' current sizes.
+        self.assertEqual(1000, migration.allocation(self.summary(disk=1000))['disk_mb'])
+        peer = self.migration(databases={'c58blog': 300 * 1048576})
+        migration.peers = [peer]
+        self.assertEqual(1600, migration.allocation(self.summary(disk=20480))['disk_mb'])
+        self.assertEqual(1000, migration.allocation(self.summary(disk=2000))['disk_mb'])  # shares of both reserves
+        with self.assertRaisesRegex(m.MigrationError, 'exceed the website disk quota'):
+            migration.allocation(self.summary(disk=1500))
+        # Room for both databases' reserves: 1 GB each; otherwise shares of their sizes (40 of 340 MB). The traffic is shared
+        # with the website still to create.
+        self.assertEqual({'c57shop': 1024}, migration.allocation(self.summary(disk=20480, database=4096))['databases_mb'])
+        self.assertEqual({'c57shop': 120}, migration.allocation(self.summary(disk=20480, database=1024))['databases_mb'])
+        with self.assertRaisesRegex(m.MigrationError, 'and those of the other websites 300 MB'):
+            migration.allocation(self.summary(disk=20480, database=320))
+        summary = self.summary(disk=20480, traffic=30000)
+        self.assertEqual(15000, migration.allocation(summary)['traffic_mb'])
+        # Once the peer's website and database exist, the API's allocation counts them instead.
+        peer.state['objects'] = {'site': {'record': {}}, 'db:c58blog': {'record': {}}}
+        self.assertEqual((30000, 1600, {'c57shop': 1024}), tuple(migration.allocation(summary)[key] for key in ('traffic_mb', 'disk_mb', 'databases_mb')))
+
     def test_count_limits_and_source_sizes_are_checked_before_writes(self):
         migration = self.migration()
         self.assertEqual({'web_domains': 1, 'web_alias_domains': 1, 'web_subdomains': 0, 'database_users': 1, 'databases': 1},
@@ -98,21 +125,6 @@ class MigrationTests(unittest.TestCase):
                                   'user:c57shop': {'record': {}}})
         self.assertEqual({'web_domains': 0, 'web_alias_domains': 0, 'web_subdomains': 0, 'database_users': 0, 'databases': 1},
                          resumed.needed_counts())
-        # Domains with their own folder count as alias domains and subdomains, like ISPConfig's limits.
-        resumed.state['inventory']['children'] += [{'domain_id': 'd7', 'type': 'vhostalias'}, {'domain_id': 's5', 'type': 'vhostsubdomain'}]
-        self.assertEqual((1, 1), (resumed.needed_counts()['web_alias_domains'], resumed.needed_counts()['web_subdomains']))
-
-    def test_folders_of_domains_with_their_own_folder_are_copied_and_checked_on_the_target(self):
-        migration = self.migration()
-        migration.kind, migration.local_web = 'plesk', True
-        migration.site = {'document_root': '/var/www/clients/client6/web9', 'system_user': 'web9', 'system_group': 'client6'}
-        migration.state['inventory'].update(site={'www_root': HOME + '/httpdocs'}, children=[
-            {'domain_id': 'd7', 'type': 'vhostalias', 'web_folder': 'addon.test', 'www_root': HOME + '/addon.test'},
-            {'domain_id': 'd11', 'type': 'vhostalias', 'web_folder': 'addon.test/blog'}])
-        self.assertEqual(['web', 'private', 'addon.test'], migration.website_folders())
-        self.assertEqual([(HOME + '/httpdocs', 'web'), (HOME + '/addon.test', 'addon.test')], migration.link_roots())
-        self.assertEqual(['addon.test'], json.loads(migration.files_command()[-1])['folders'])
-        self.assertNotIn('folders', json.loads(migration.files_command(folders=False)[-1]))
 
     def test_problem_summary_exposes_limits_without_reflected_credentials(self):
         problem = {'type': 'https://github.com/FELDSAM-INC/ispconfig-rest/blob/main/docs/problems.md#quota-exceeded',
@@ -647,7 +659,7 @@ class PleskTests(unittest.TestCase):
         self.assertEqual(('', 'www'), (children['shop.other']['redirect_type'], children['shop.other']['subdomain']))
         notes = '\n'.join(inventory['notes'])
         for expected in ('own.shop.test has its own folder', 'go.shop.test has no website hosting', 'mail-only.test is not used',
-                         'Other websites of this Plesk subscription, migrated separately: addon.test', 'Duplicate cron job skipped'):
+                         'Other websites of this Plesk subscription, each migrated as a website of its own: addon.test (all at once: --subscription)', 'Duplicate cron job skipped'):
             self.assertIn(expected, notes)
         # Chroot/Plesk files are not reported; folders of the subscription's other websites neither.
         self.assertEqual(['private-data', 'wordpress-backups'], inventory['not_copied'])
@@ -662,72 +674,51 @@ class PleskTests(unittest.TestCase):
         addon = m.plesk_inventory(PLESK_ROWS, PLESK_ACCOUNT, 'addon.test', databases=['addon_wp'])
         self.assertEqual(['addon_wp'], [db['database_name'] for db in addon['databases']])
         # Subdomains in the main website's folder go with it; one with its own folder is migrated on its own.
-        self.assertIn('Other websites of this Plesk subscription, migrated separately: own.shop.test, shop.test', '\n'.join(addon['notes']))
+        self.assertIn('Other websites of this Plesk subscription, each migrated as a website of its own: own.shop.test, shop.test', '\n'.join(addon['notes']))
         with self.assertRaisesRegex(m.MigrationError, 'Not a database of this Plesk subscription: other_db'):
             self.inventory(databases=['other_db'])
         remote = PLESK_ROWS + [{'t': 'database', 'id': 14, 'name': 'far', 'type': 'mysql', 'dom_id': 1, 'server_id': 2, 'default_user_id': None}]
         with self.assertRaisesRegex(m.MigrationError, 'not on the local MySQL server'):
             m.plesk_inventory(remote, PLESK_ACCOUNT, 'shop.test')
 
-    def test_a_whole_subscription_is_one_website_with_its_domains_in_their_own_folders(self):
-        rows = [plesk_domain(7, 'addon.test', webspace=1, root=HOME + '/addon.test', handler='alt-php83-fpm', zone=37)
-                if row['t'] == 'domain' and row['id'] == 7 else row for row in PLESK_ROWS] + [
-            plesk_domain(11, 'blog.addon.test', webspace=1, parent=7, root=HOME + '/addon.test/blog', handler='alt-php74-fpm'),
-            plesk_domain(12, 'shared.test', webspace=1, root=HOME + '/httpdocs'),
-            plesk_domain(13, 'clash.test', webspace=1, root=HOME + '/web', zone=38),
-            plesk_domain(14, 'paused.test', webspace=1, root=HOME + '/paused.test', status=16),
-            {'t': 'alias', 'id': 4, 'dom_id': 7, 'name': 'addon.example', 'status': 0, 'web': 'true', 'dns': 'false',
-             'seo_redirect': 'false', 'dns_zone_id': None},
-            {'t': 'database', 'id': 15, 'name': 'addon_extra', 'type': 'mysql', 'dom_id': 7, 'server_id': 1, 'default_user_id': None},
-        ]
-        alone = m.plesk_inventory(rows, PLESK_ACCOUNT, 'shop.test')
-        self.assertIn('(or together with this website as domains with their own folder: --subscription)', '\n'.join(alone['notes']))
-        inventory = m.plesk_inventory(rows, PLESK_ACCOUNT, 'shop.test', subscription=True)
-        # The website's own children come first and are unchanged.
-        self.assertEqual(alone['children'], inventory['children'][:len(alone['children'])])
-        extra = {child['domain']: child for child in inventory['children'][len(alone['children']):]}
-        self.assertEqual({'own.shop.test', 'addon.test', 'blog.addon.test', 'shared.test'}, set(extra))
-        self.assertEqual(('vhostalias', 'addon.test', HOME + '/addon.test', '8.3', 'd7'),
-                         tuple(extra['addon.test'][key] for key in ('type', 'web_folder', 'www_root', 'php_version', 'domain_id')))
-        self.assertEqual(('vhostsubdomain', 'own.shop.test', HOME + '/own.shop.test', 's5'),
-                         tuple(extra['own.shop.test'][key] for key in ('type', 'web_folder', 'www_root', 'domain_id')))
-        # Inside a copied folder: copied with it.
-        self.assertEqual(('vhostalias', 'addon.test/blog', None, '7.4'),
-                         tuple(extra['blog.addon.test'].get(key) for key in ('type', 'web_folder', 'www_root', 'php_version')))
-        self.assertEqual(('alias', 'www', None), tuple(extra['shared.test'].get(key) for key in ('type', 'subdomain', 'web_folder')))
-        self.assertEqual([(HOME + '/addon.test', 'addon.test'), (HOME + '/own.shop.test', 'own.shop.test')], m.own_folders(inventory))
-        notes = '\n'.join(inventory['notes'])
-        for expected in ('Alias addon.example of addon.test is not migrated', 'paused.test is disabled in Plesk',
-                         'clash.test: its folder %s/web cannot be a folder of the new website' % HOME):
-            self.assertIn(expected, notes)
-        self.assertNotIn('migrated separately', notes)
-        self.assertNotIn('own.shop.test has its own folder', notes)
-        # All of the subscription's databases (Plesk often assigns them all to the main domain) and its cron jobs.
-        self.assertEqual(['addon_extra', 'addon_wp', 'shop-old_db', 'shop_wp'], [db['database_name'] for db in inventory['databases']])
-        self.assertNotIn('addon_extra', [db['database_name'] for db in alone['databases']])
-        commands = [m.render_cron(job, document_root='/var/www/clients/client6/web9', cron_type='full', php_cli='/usr/bin/php')
-                    for job in inventory['cron'] if 'reason' not in job]
-        self.assertIn('/usr/bin/php /var/www/clients/client6/web9/addon.test/cron.php', commands)
-        self.assertNotIn('/usr/bin/php /var/www/clients/client6/web9/addon.test/cron.php',
-                         [m.render_cron(job, document_root='/var/www/clients/client6/web9', cron_type='full', php_cli='/usr/bin/php')
-                          for job in alone['cron'] if 'reason' not in job])
-        self.assertIn({'id': 37, 'domain': 'addon.test', 'role': 'domain'}, inventory['dns_zones'])
-        self.assertNotIn(38, [zone['id'] for zone in inventory['dns_zones']])  # clash.test is not migrated: neither its zone
-        self.assertEqual(['shop.test', 'blog.shop.test', 'addon.test', 'own.shop.test', 'blog.addon.test'],
-                         [entry['name'] for entry in m.plesk_php_request(rows, inventory)['domains']])
-        with self.assertRaisesRegex(m.MigrationError, "run it for the subscription's main domain shop.test"):
-            m.plesk_inventory(rows, PLESK_ACCOUNT, 'addon.test', subscription=True)
+    def test_the_websites_of_a_subscription_and_their_document_roots(self):
+        self.assertEqual((['addon.test', 'own.shop.test'], []), m.plesk_subscription_websites(PLESK_ROWS, 'shop.test'))
+        with self.assertRaisesRegex(m.MigrationError, "starts from the subscription's main domain shop.test"):
+            m.plesk_subscription_websites(PLESK_ROWS, 'addon.test')
+        rows = PLESK_ROWS + [plesk_domain(11, 'deep.test', webspace=1, root=HOME + '/sites/deep.test')]
+        names, skipped = m.plesk_subscription_websites(rows, 'shop.test')
+        self.assertEqual(['addon.test', 'own.shop.test'], names)
+        self.assertIn('deep.test: The document root %s/sites/deep.test is a subfolder' % HOME, skipped[0])
+        self.assertEqual({HOME + '/httpdocs': 'shop.test', HOME + '/httpdocs/blog': 'shop.test', HOME + '/own.shop.test': 'own.shop.test',
+                          HOME + '/addon.test': 'addon.test'}, m.plesk_websites(PLESK_ROWS, 1))
 
-    def test_folders_of_the_subscription_domains_on_the_new_website(self):
-        copied = [(HOME + '/httpdocs', 'web'), (HOME + '/addon.test', 'addon.test')]
-        self.assertEqual(('web/shop', False), m.plesk_folder(HOME + '/httpdocs/shop', HOME, copied))
-        self.assertEqual(('addon.test/blog', False), m.plesk_folder(HOME + '/addon.test/blog', HOME, copied))
-        self.assertEqual(('sites/b.test', True), m.plesk_folder(HOME + '/sites/b.test', HOME, copied))
-        for path in (HOME + '/addon.test', HOME, HOME + '/Private/x', HOME + '/.hidden', '/var/www/vhosts/other/x',
-                     HOME + '/' + 'x' * 101):
-            with self.subTest(path=path):
-                self.assertIsNone(m.plesk_folder(path, HOME, copied))
-        self.assertIsNone(m.plesk_folder(HOME, '/var/www/vhosts', [(HOME + '/httpdocs', 'web')]))  # would hold the website
+    def test_databases_go_with_the_website_whose_configuration_uses_them(self):
+        rows = PLESK_ROWS + [{'t': 'database', 'id': 14, 'name': 'spare', 'type': 'mysql', 'dom_id': 1, 'server_id': 1, 'default_user_id': None},
+                             {'t': 'database', 'id': 15, 'name': 'own_db', 'type': 'mysql', 'dom_id': 7, 'server_id': 1, 'default_user_id': None}]
+        # All are assigned to shop.test in Plesk (as on dusin.sk), but each website's wp-config.php names its own.
+        usage = {HOME + '/httpdocs': ['shop_wp'], HOME + '/httpdocs/blog': ['shop-old_db'], HOME + '/addon.test': ['addon_wp'],
+                 HOME + '/own.shop.test': ['own_db', 'shop_wp']}
+
+        def inventory(domain, found=usage):
+            result = m.plesk_inventory(rows, PLESK_ACCOUNT, domain, usage=found)
+            return [db['database_name'] for db in result['databases']], '\n'.join(result['notes'])
+        names, notes = inventory('shop.test')
+        self.assertEqual(['shop-old_db', 'shop_wp', 'spare'], names)  # spare: no configuration names it, Plesk's assignment
+        self.assertIn('Database addon_wp (assigned to this domain in Plesk) is used by addon.test and migrated with it', notes)
+        self.assertIn('Database shop_wp is also used by own.shop.test; it is migrated with this website: point it to its new copy', notes)
+        self.assertIn('Databases of other websites of the subscription, not migrated (select with --database): own_db', notes)
+        names, notes = inventory('addon.test')
+        self.assertEqual(['addon_wp'], names)
+        self.assertIn('Database addon_wp (assigned to shop.test in Plesk) is migrated with this website', notes)
+        names, notes = inventory('own.shop.test')
+        self.assertEqual(['own_db'], names)  # assigned to addon.test in Plesk, used here
+        self.assertIn('Database shop_wp is also used by this website, but migrated with shop.test', notes)
+        # The website's own configuration could not be read: Plesk's assignment, as before.
+        names, notes = inventory('shop.test', dict(usage, **{HOME + '/httpdocs': None}))
+        self.assertEqual(['addon_wp', 'shop-old_db', 'shop_wp', 'spare'], names)
+        self.assertIn('could not be read', notes)
+        # Without the helper's answer (an explicit --database, or a resumed migration): unchanged.
+        self.assertEqual(['addon_wp', 'shop-old_db', 'shop_wp', 'spare'], [db['database_name'] for db in m.plesk_inventory(rows, PLESK_ACCOUNT, 'shop.test')['databases']])
 
     def test_websites_that_cannot_be_migrated_stop_with_the_reason(self):
         for domain, message in (('off.test', 'suspended or disabled'), ('mail.test', 'no website hosting'),
@@ -879,6 +870,70 @@ class PleskTests(unittest.TestCase):
         self.assertFalse(sites['off.test']['active'])
         self.assertEqual('forwarding', sites['go.shop.test']['redirect'])
 
+    def test_a_subscription_run_plans_every_website_confirms_once_and_continues_past_a_review(self):
+        class Fake:
+            def __init__(self, domain, phase):
+                self.domain, self.state, self.calls = domain, {'phase': phase, 'objects': {}}, []
+
+            def plan(self):
+                self.calls.append('plan')
+                events.append(('plan', self.domain))
+
+            def run(self, **kwargs):
+                events.append(('run', self.domain))
+                if self.domain == 'a.test':
+                    self.state['phase'] = 'prepared'
+                    raise m.MigrationError('Edit configs in the staged tree')
+                self.state['phase'] = 'copied'
+
+            def needed_counts(self):
+                return {'web_domains': 1}
+
+            def usage_summary(self):
+                return {'counts': {'web_domains': {'used': 0, 'limit': limit}}}
+        events, limit = [], None
+        done, first, second = Fake('done.test', 'copied'), Fake('a.test', 'planned'), Fake('b.test', 'planned')
+        with patch.object(m, 'interactive', side_effect=lambda migration: events.append(('alone', migration.domain))), \
+                patch.object(m, 'confirm', side_effect=lambda message: events.append(('confirm', message))), patch('sys.stdout', io.StringIO()):
+            with self.assertRaisesRegex(m.MigrationError, 'Review the prepared files of a.test, then run the same command again'):
+                m.interactive_subscription([done, first, second])
+            self.assertEqual([('alone', 'done.test'), ('plan', 'a.test'), ('plan', 'b.test')], events[:3])
+            self.assertEqual(('confirm', 'Are writes and scheduled jobs stopped on the OLD sites (a.test, b.test)? Start migration?'), events[3])
+            self.assertEqual([('run', 'a.test'), ('run', 'b.test')], events[4:])
+            self.assertEqual('copied', second.state['phase'])
+            # Two websites where the client's plan allows one more: nothing starts.
+            events.clear()
+            limit = 1
+            with self.assertRaisesRegex(m.MigrationError, 'Client limit for websites is too small: limit 1, used 0, migration needs 2 more'):
+                m.interactive_subscription([Fake('c.test', 'planned'), Fake('d.test', 'planned')])
+            self.assertNotIn('confirm', [event[0] for event in events])
+            with self.assertRaisesRegex(m.MigrationError, 'c.test: resume the unfinished migration'):
+                m.interactive_subscription([Fake('c.test', 'planned')], sync=True)
+
+    def test_the_websites_of_a_subscription_are_chosen_once_with_their_own_states(self):
+        target = {'api_url': 'https://panel.example/api/v1', 'api_key_file': '/unused', 'web_ssh': 'root@new',
+                  'db_ssh': 'root@db', 'web_server_id': 4, 'db_server_id': 5, 'db_host': 'db0'}
+        with tempfile.TemporaryDirectory() as root, patch.object(m, 'Api', MagicMock()), patch('sys.stdout', io.StringIO()):
+            config = {'source': {'type': 'plesk', 'ssh': 'root@plesk.test'}, 'target': target, 'state_dir': root}
+            main = m.Migration(config, m.private_directory(Path(root) / 'shop.test'), 'shop.test', 6)
+            main.dns = False
+            with patch.object(m.Migration, 'plesk', return_value=json.dumps({'rows': PLESK_ROWS})) as plesk, contextlib.ExitStack() as stack:
+                migrations = m.subscription_migrations(main, config, stack)
+                self.assertEqual(['shop.test', 'addon.test', 'own.shop.test'], [each.domain for each in migrations])
+                self.assertEqual([migrations[0], migrations[2]], migrations[1].peers)
+                self.assertEqual((False, Path(root) / 'addon.test'), (migrations[1].dns, migrations[1].directory))
+                self.assertEqual(['addon.test', 'own.shop.test'], m.read_json(Path(root) / 'shop.test/state.json')['subscription'])
+                # Each state is locked for the run.
+                with self.assertRaisesRegex(m.MigrationError, 'Another process is using the migration state'):
+                    with m.locked(Path(root) / 'addon.test'):
+                        pass
+            with patch.object(m.Migration, 'plesk') as plesk, contextlib.ExitStack() as stack:
+                self.assertEqual(3, len(m.subscription_migrations(main, config, stack)))
+                plesk.assert_not_called()  # kept in the state
+            main.state['subscription'] = True  # hosting 1.12.0: domains with their own folder
+            with self.assertRaisesRegex(m.MigrationError, 'started by hosting 1.12.0'), contextlib.ExitStack() as stack:
+                m.subscription_migrations(main, config, stack)
+
     def test_plesk_source_selection_keeps_existing_fingerprints(self):
         target = {'api_url': 'https://panel.example/api/v1', 'api_key_file': '/unused', 'web_ssh': 'root@new',
                   'db_ssh': 'root@db', 'web_server_id': 4, 'db_server_id': 5, 'db_host': 'db0'}
@@ -897,8 +952,25 @@ class PleskTests(unittest.TestCase):
             with self.assertRaisesRegex(m.MigrationError, 'exactly "type": "plesk" and "ssh"'):
                 m.Migration(dict(plesk, source={'type': 'plesk', 'ssh': 'root@p', 'web_ssh': 'root@p'}), state, 'shop.test', 6)
         args = m.parse_args(['--simple', 'shop.test', '6', '--from', 'plesk', '--database', 'a_db', '--database', 'b_db'])
-        self.assertEqual(('plesk', ['a_db', 'b_db']), (args.source_name, args.database))
+        self.assertEqual(('plesk', ['a_db', 'b_db'], False), (args.source_name, args.database, args.subscription))
+        self.assertTrue(m.parse_args(['--simple', 'shop.test', '6', '--from', 'plesk', '--subscription', '--plan']).subscription)
+        for bad in (['--subscription', '--php', '8.1'], ['--subscription', '--database', 'a_db']):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit), patch('sys.stderr', io.StringIO()):
+                m.parse_args(['--simple', 'shop.test', '6', '--from', 'plesk'] + bad)
         self.assertEqual('plesk', m.parse_args(['--simple', '--sites', '--from', 'plesk']).source_name)
+
+    def test_the_helper_finds_database_names_but_not_user_names_in_configuration(self):
+        spec = importlib.util.spec_from_file_location('plesk_source', TOOLS / 'plesk-source.py')
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        names = ['dusinsk_wordpress_8', 'dusinsk_wordpress_b', 'shop', 'dusinsk_wordpress_80x']
+        pattern = re.compile('(?<![A-Za-z0-9_-])(%s)(?![A-Za-z0-9_-])' % '|'.join(re.escape(name) for name in sorted(names, key=len, reverse=True)))
+        wp_config = ("<?php\n/** Database username */\ndefine('DB_NAME', 'dusinsk_wordpress_b');\n"
+                     "define('DB_USER',       'dusinsk_wordpress_8');\ndefine('DB_HOST', 'localhost:3306');\n")
+        self.assertEqual({'dusinsk_wordpress_b'}, helper.names_in(wp_config, pattern))
+        joomla = "<?php\nclass JConfig {\n\tpublic $user = 'shop';\n\tpublic $db = 'dusinsk_wordpress_8';\n\tpublic $dbprefix = 'shop_';\n}\n"
+        self.assertEqual({'dusinsk_wordpress_8'}, helper.names_in(joomla, pattern))  # shop_ is no name
+        self.assertEqual({'shop'}, helper.names_in("DB_DATABASE=shop\nDB_USERNAME=dusinsk_wordpress_8\n", pattern))
 
     def test_helper_runs_with_the_python_of_rhel8_and_never_as_a_shell_string(self):
         import ast
@@ -977,37 +1049,6 @@ class PleskTests(unittest.TestCase):
             (Path(tree) / 'web/logs').symlink_to(HOME + '/logs')
             with self.assertRaisesRegex(m.MigrationError, 'External absolute symlink'):
                 m.normalize_links(tree, [(HOME + '/httpdocs', 'web')])
-            (Path(tree) / 'web/logs').unlink()
-            # Between the folders of a whole subscription (--subscription).
-            (Path(tree) / 'addon.test/files').mkdir(parents=True)
-            (Path(tree) / 'web/addon').symlink_to(HOME + '/addon.test/files')
-            (Path(tree) / 'addon.test/media').symlink_to('../web/wp-content/uploads')
-            roots = [(HOME + '/httpdocs', 'web'), (HOME + '/addon.test', 'addon.test')]
-            m.normalize_links(tree, roots)
-            self.assertEqual('../addon.test/files', os.readlink(Path(tree) / 'web/addon'))
-            with self.assertRaisesRegex(m.MigrationError, 'Symlink leaves the migrated'):
-                m.normalize_links(tree, [(HOME + '/httpdocs', 'web')])
-
-    def test_old_paths_of_each_subscription_folder_get_their_new_folder(self):
-        new = '/var/www/clients/client3/web104'
-        with tempfile.TemporaryDirectory() as tree:
-            for name in ('web/.user.ini', 'addon.test/.user.ini', 'addon.test/config.php', 'addon.test/lib/deep.php'):
-                Path(tree, name).parent.mkdir(parents=True, exist_ok=True)
-                Path(tree, name).write_text('x %s/wordfence-waf.php\n' % (HOME + ('/httpdocs' if name.startswith('web') else '/addon.test')))
-            tops = ('web', 'addon.test')
-            self.assertEqual(['addon.test/.user.ini', 'addon.test/config.php'],
-                             m.rewrite_old_paths(tree, HOME + '/addon.test', new + '/addon.test', tops=tops))
-            self.assertEqual('x %s/addon.test/wordfence-waf.php\n' % new, Path(tree, 'addon.test/config.php').read_text())
-            self.assertEqual(['web/.user.ini'], m.rewrite_old_paths(tree, HOME + '/httpdocs', new + '/web', chroot=True, tops=tops))
-            self.assertEqual('x /web/wordfence-waf.php\n', Path(tree, 'web/.user.ini').read_text())
-            Path(tree, 'addon.test/.user.ini').write_text('x %s/addon.test/a\n' % HOME)
-            self.assertEqual(['addon.test/.user.ini'],
-                             m.rewrite_old_paths(tree, HOME + '/addon.test', new + '/addon.test', chroot=True, jail='/addon.test', tops=tops))
-            self.assertEqual('x /addon.test/a\n', Path(tree, 'addon.test/.user.ini').read_text())
-            self.assertEqual([], m.old_path_references(tree, HOME, tops=tops))
-            self.assertEqual([], m.old_path_references(tree, HOME))  # deeper PHP is not scanned
-            Path(tree, 'addon.test/index.php').write_text('<?php // %s/addon.test\n' % HOME)
-            self.assertEqual(['addon.test/index.php'], m.old_path_references(tree, HOME, tops=tops))
 
 
 def zone_row(id, name, **values):

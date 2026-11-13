@@ -305,24 +305,43 @@ def available_traffic_mb(summary, client_id):
     return remaining
 
 
-def database_quotas(summary, client_id, sizes):
-    """Split the client's unallocated database quota across databases still to create.
+# A migrated website or database gets twice its size, at least 1 GB; the rest of the client's quota stays free for
+# other websites.
+RESERVE_MIN_MB = 1024
 
-    sizes maps database name -> measured source bytes. Shares are proportional
-    to the source sizes, so every database receives at least its current size.
+
+def size_mb(size):
+    return max(-(-size // MB), 1)
+
+
+def reserved_mb(size):
+    """Quota for an object of size bytes: twice its size, at least RESERVE_MIN_MB."""
+    return max(2 * size_mb(size), RESERVE_MIN_MB)
+
+
+def database_quotas(summary, client_id, sizes, others=()):
+    """Quotas of the databases still to create from the client's unallocated database quota.
+
+    sizes maps database name -> measured source bytes; others are the sizes of the other websites' databases still to
+    create in the same run (--subscription). Each gets reserved_mb when all of them fit; otherwise the quota is split
+    in proportion to the source sizes of all of them, so every database receives at least its current size.
     """
     if not sizes:
         return {}
     remaining = remaining_mb(summary, client_id, 'database_size', 'database quota')
     if remaining == -1:
         return {name: -1 for name in sizes}
-    needs = {name: max(-(-size // MB), 1) for name, size in sizes.items()}
-    total = sum(needs.values())
-    require(remaining >= total,
-            'Database quota is too small: %d MB unallocated, the source database(s) need %d MB (%s). '
+    needs = {name: size_mb(size) for name, size in sizes.items()}
+    total, others_mb = sum(needs.values()), sum(size_mb(size) for size in others)
+    require(remaining >= total + others_mb,
+            'Database quota is too small: %d MB unallocated, the source database(s) need %d MB (%s)%s. '
             'Raise the client database quota, then repeat the command.'
-            % (remaining, total, ', '.join('%s %d MB' % item for item in sorted(needs.items()))))
-    return {name: remaining * need // total for name, need in needs.items()}
+            % (remaining, total, ', '.join('%s %d MB' % item for item in sorted(needs.items())),
+               ' and those of the other websites %d MB' % others_mb if others_mb else ''))
+    wanted = {name: reserved_mb(size) for name, size in sizes.items()}
+    if sum(wanted.values()) + sum(reserved_mb(size) for size in others) <= remaining:
+        return wanted
+    return {name: remaining * need // (total + others_mb) for name, need in needs.items()}
 
 
 def php_configuration(rows, version, client_id):
@@ -368,12 +387,10 @@ def check_counts(summary, needed):
 def normalize_links(tree, old_root):
     """Make absolute in-site links relative; reject links outside web/private.
 
-    old_root is the old website root (mirrored by the tree) or a list of (old directory, tree folder) pairs; links may
-    also point into those folders.
+    old_root is the old website root (mirrored by the tree) or a list of (old directory, tree folder) pairs.
     """
     tree = Path(tree).resolve()
     roots = [(old_root, '')] if isinstance(old_root, str) else list(old_root)
-    allowed = ['web', 'private'] + [folder for _, folder in roots if folder not in ('', 'web', 'private')]
     for directory, dirs, files in os.walk(tree, followlinks=False):
         for name in dirs + files:
             path = Path(directory) / name
@@ -398,7 +415,7 @@ def normalize_links(tree, old_root):
                     resolved = path.resolve(strict=True)
                 except (OSError, RuntimeError):
                     raise MigrationError('Broken/cyclic symlink: ' + str(path.relative_to(tree))) from None
-                require(any(resolved == tree / folder or tree / folder in resolved.parents for folder in allowed),
+                require(any(resolved == tree / folder or tree / folder in resolved.parents for folder in ('web', 'private')),
                         'Symlink leaves the migrated web/private folders: ' + str(path.relative_to(tree)))
 
 
@@ -413,12 +430,6 @@ PLESK_SYSTEM_ENTRIES = frozenset((
     '.ssh', '.cache', '.config', '.local', '.composer', '.nodenv', '.npm', '.wp-cli', '.mysql_history', '.lesshst',
     '.viminfo', '.wget-hsts', '.python_history', '.gnupg', '.trash', '.wp-toolkit', '.secure_site_id'))
 FOLDER_PART = re.compile(r'[A-Za-z0-9_][A-Za-z0-9._-]*')
-# Folders ISPConfig keeps in a website root, and those its web server plugin refuses for a domain with its own
-# folder (is_blacklisted_web_path: the vhost is then not created).
-RESERVED_FOLDERS = frozenset(('web', 'private', 'log', 'ssl', 'tmp', 'backup', 'cgi-bin', 'webdav', 'bin', 'dev', 'etc',
-                              'home', 'lib', 'lib64', 'usr', 'var', 'proc', 'net', 'sys', 'srv', 'sbin', 'run'))
-# ISPConfig domains of a website with a folder (and PHP) of their own.
-VHOST_CHILDREN = ('vhostsubdomain', 'vhostalias')
 CRON_FIELDS = (('run_min', 0, 59, 1), ('run_hour', 0, 23, 60), ('run_mday', 1, 31, 1440),
                ('run_month', 1, 12, 40320), ('run_wday', 0, 7, 1440))
 CRON_ENTRY = re.compile(r'(?:([0-9]+)(?:-([0-9]+))?|\*)(?:/([1-9][0-9]*))?\Z')
@@ -645,33 +656,10 @@ def plesk_site(rows, domain):
     return site
 
 
-def plesk_folder(path, home, copied):
-    """The website folder of a Plesk domain of the subscription with its own folder: (folder, True) for a folder copied
-    on its own, (folder, False) inside one of the copied folders ((Plesk folder, website folder) pairs, the document
-    root first), or None when the new website cannot have it (outside the webspace, an ISPConfig folder, shared)."""
-    for source, target in copied:
-        if path.startswith(source + '/'):
-            relative = target + '/' + path[len(source) + 1:]
-            parts = path[len(source) + 1:].split('/')
-            return (relative, False) if all(FOLDER_PART.fullmatch(part) for part in parts) and len(relative) <= 100 else None
-    if not path.startswith(home + '/') or any(source == path or source.startswith(path + '/') for source, _ in copied):
-        return None
-    relative = path[len(home) + 1:]
-    parts = relative.split('/')
-    if not all(FOLDER_PART.fullmatch(part) for part in parts) or parts[0].lower() in RESERVED_FOLDERS or len(relative) > 100:
-        return None
-    return relative, True
-
-
-def own_folders(inventory):
-    """(Plesk folder, website folder) of the domains copied from a folder of their own (--subscription)."""
-    return [(child['www_root'], child['web_folder']) for child in inventory['children'] if child.get('www_root')]
-
-
 def plesk_php_request(rows, inventory):
     """The website and its subdomains with their own folder, with their Plesk PHP handlers, for their PHP settings."""
     handlers = {str(row['name']).lower(): row.get('php_handler') for row in plesk_rows(rows).get('domain', [])}
-    names = [inventory['site']['domain']] + [child['domain'] for child in inventory['children'] if child['type'] in VHOST_CHILDREN]
+    names = [inventory['site']['domain']] + [child['domain'] for child in inventory['children'] if child['type'] == 'vhostsubdomain']
     return {'action': 'php', 'domains': [{'name': name, 'handler': handlers.get(name)} for name in names]}
 
 
@@ -687,23 +675,64 @@ def opcache_text(value):
     return {'on': 'on, as in Plesk', 'off': 'off, as in Plesk'}.get(value, 'on (Plesk does not tell)')
 
 
-def plesk_inventory(rows, account, domain, databases=None, subscription=False):
+def plesk_with_parent(by_id, row):
+    """A subdomain that is migrated together with its parent website (same folder or inside its document root)."""
+    parent = by_id.get(row['parent_id'])
+    if not parent or parent['htype'] != 'vrt_hst' or not parent['www_root'] or not row['www_root']:
+        return False
+    parent_root, child_root = parent['www_root'].rstrip('/'), row['www_root'].rstrip('/')
+    return child_root == parent_root or child_root.startswith(parent_root + '/')
+
+
+def plesk_websites(rows, subscription_id):
+    """Document root -> the website of the Plesk subscription it belongs to (a subdomain in its parent's folder
+    belongs to the parent's website)."""
+    domains = [row for row in plesk_rows(rows).get('domain', []) if (row['webspace_id'] or row['id']) == subscription_id
+               and row['htype'] == 'vrt_hst' and row['www_root']]
+    by_id = {row['id']: row for row in plesk_rows(rows).get('domain', [])}
+    result = {}
+    # Websites first, so a root they share with a subdomain stays theirs.
+    for row in sorted(domains, key=lambda row: (plesk_with_parent(by_id, row), row['id'])):
+        website = by_id[row['parent_id']] if plesk_with_parent(by_id, row) else row
+        result.setdefault(str(row['www_root']).rstrip('/'), str(website['name']).lower())
+    return result
+
+
+def plesk_subscription_websites(rows, domain):
+    """The other websites of the Plesk subscription of its main domain (each migrated as a website of its own with
+    --subscription), and why others cannot be migrated."""
+    site = plesk_site(rows, domain)
+    domains = plesk_rows(rows).get('domain', [])
+    by_id = {row['id']: row for row in domains}
+    require(not site['webspace_id'], "--subscription starts from the subscription's main domain %s"
+            % str(by_id.get(site['webspace_id'], {}).get('name', '?')).lower())
+    names, skipped = [], []
+    for row in sorted(domains, key=lambda row: str(row['name']).lower()):
+        name = str(row['name']).lower()
+        if row['id'] == site['id'] or (row['webspace_id'] or row['id']) != site['id'] or row['htype'] != 'vrt_hst' \
+                or name.startswith('_.') or plesk_with_parent(by_id, row):
+            continue
+        try:
+            plesk_site(rows, name)
+            names.append(name)
+        except MigrationError as exc:
+            skipped.append('%s: %s' % (name, exc))
+    return names, skipped
+
+
+def plesk_inventory(rows, account, domain, databases=None, usage=None):
     """Plesk metadata in the migration's inventory format: the website, its databases, aliases, subdomains and cron.
 
-    databases names exactly which databases of the subscription to migrate; by default, those Plesk assigns to the domain.
-    subscription: the whole Plesk subscription of its main domain; its other websites (additional domains, subdomains with
-    a folder of their own) become domains with their own folder of the website, as in Plesk's webspace, with all of the
-    subscription's databases and cron jobs.
+    databases names exactly which databases of the subscription to migrate. By default, the databases the website's
+    configuration names (usage: document root -> database names found there, plesk-source.py 'databases'), and those
+    Plesk assigns to the domain that no website's configuration names; without usage, those Plesk assigns to the domain.
     """
     site = plesk_site(rows, domain)
     grouped = plesk_rows(rows)
     domains = grouped.get('domain', [])
     home, root = site['home'].rstrip('/'), site['www_root'].rstrip('/')
     subscription_id = site['webspace_id'] or site['id']
-    require(not subscription or not site['webspace_id'],
-            '--subscription migrates a whole Plesk subscription; run it for the subscription\'s main domain %s'
-            % next((str(row['name']).lower() for row in domains if row['id'] == subscription_id), '?'))
-    notes, children, wildcard, deferred = [], [], False, []
+    notes, children, wildcard = [], [], False
     # Plesk DNS zones of the website, its aliases (also those for mail/DNS only) and the subdomains migrated with it.
     zones = [{'id': site.get('dns_zone_id'), 'domain': domain, 'role': 'website'}]
     for child in sorted((row for row in domains if row['parent_id'] == site['id']), key=lambda row: row['name']):
@@ -729,11 +758,9 @@ def plesk_inventory(rows, account, domain, databases=None, subscription=False):
                              'web_folder': 'web/' + child_root[len(root) + 1:], 'php_version': plesk_php_version(child['php_handler']),
                              'redirect_type': '', 'redirect_path': '', 'active': 'y'})
             zones.append({'id': child.get('dns_zone_id'), 'domain': name, 'role': 'subdomain'})
-        elif subscription:
-            deferred.append(child)
         else:
-            notes.append('Subdomain %s has its own folder outside the document root; migrate it separately '
-                         '(ispcp-migrate --from plesk %s CLIENT_ID) or with the whole subscription (--subscription)' % (name, name))
+            notes.append('Subdomain %s has its own folder outside the document root; migrate it as a website of its own '
+                         '(ispcp-migrate --from plesk %s CLIENT_ID%s)' % (name, name, '' if site['webspace_id'] else ', or all at once: --subscription'))
     for alias in sorted((row for row in grouped.get('alias', []) if row['dom_id'] == site['id']), key=lambda row: row['name']):
         name = str(alias['name']).lower()
         zone = {'id': alias.get('dns_zone_id'), 'domain': name, 'role': 'alias'}
@@ -750,85 +777,60 @@ def plesk_inventory(rows, account, domain, databases=None, subscription=False):
                          'redirect_type': 'R=301,L' if redirect else '', 'redirect_path': '[scheme]://%s/' % domain if redirect else '',
                          'active': 'y' if alias['status'] == 0 else 'n'})
     by_id = {row['id']: row for row in domains}
-
-    def with_parent(row):
-        """A subdomain that is migrated together with its parent website (same folder or inside its document root)."""
-        parent = by_id.get(row['parent_id'])
-        if not parent or parent['htype'] != 'vrt_hst' or not parent['www_root'] or not row['www_root']:
-            return False
-        parent_root, child_root = parent['www_root'].rstrip('/'), row['www_root'].rstrip('/')
-        return child_root == parent_root or child_root.startswith(parent_root + '/')
-
-    copied = []  # (Plesk folder, website folder) copied besides the document root
-    if subscription:
-        others = deferred + [row for row in domains if row['id'] != site['id'] and row['parent_id'] != site['id']
-                             and (row['webspace_id'] or row['id']) == subscription_id]
-        # Parents before the domains inside their folders.
-        for row in sorted(others, key=lambda row: (len(str(row['www_root'] or '')), str(row['name']))):
-            name = str(row['name']).lower()
-            for alias in grouped.get('alias', []):
-                if alias['dom_id'] == row['id'] and alias['web'] == 'true':
-                    notes.append('Alias %s of %s is not migrated (an alias of a domain with its own folder); add it in the panel'
-                                 % (str(alias['name']).lower(), name))
-            if row['htype'] != 'vrt_hst' or not row['www_root']:
-                notes.append('%s has no website hosting in Plesk (%s) and is not migrated'
-                             % (name, 'DNS/mail only' if row['htype'] == 'none' else 'forwarding'))
-                continue
-            if row['status'] != 0:
-                notes.append('%s is disabled in Plesk and is not migrated' % name)
-                continue
-            if name.startswith('_.'):
-                notes.append('The wildcard subdomain *.%s is not migrated; configure it by hand' % name[2:])
-                continue
-            child_root = row['www_root'].rstrip('/')
-            under = name.endswith('.' + domain)
-            key = ('s%d' if row['parent_id'] else 'd%d') % row['id']
-            # Only the zones of migrated domains: their addresses become the new web server's.
-            zone = {'id': row.get('dns_zone_id'), 'domain': name, 'role': 'subdomain' if row['parent_id'] else 'domain'}
-            if child_root == root:
-                children.append({'domain_id': key, 'domain': name, 'type': 'subdomain' if under else 'alias',
-                                 'subdomain': 'none' if under else 'www', 'redirect_type': '', 'redirect_path': '', 'active': 'y'})
-                zones.append(zone)
-                continue
-            folder = plesk_folder(child_root, home, [(root, 'web')] + copied)
-            if folder is None:
-                notes.append('%s: its folder %s cannot be a folder of the new website; migrate it separately' % (name, child_root))
-                continue
-            zones.append(zone)
-            child = {'domain_id': key, 'domain': name, 'type': 'vhostsubdomain' if under else 'vhostalias', 'subdomain': 'www',
-                     'web_folder': folder[0], 'php_version': plesk_php_version(row['php_handler']),
-                     'redirect_type': '', 'redirect_path': '', 'active': 'y'}
-            if folder[1]:
-                # A folder of its own in the webspace, copied on its own (the others come with their parent's folder).
-                child['www_root'] = child_root
-                copied.append((child_root, folder[0]))
-            children.append(child)
-    else:
-        others = sorted(str(row['name']).lower() for row in domains if row['id'] != site['id'] and row['htype'] == 'vrt_hst'
-                        and (row['webspace_id'] or row['id']) == subscription_id and not str(row['name']).startswith('_.')
-                        and row['parent_id'] != site['id'] and not with_parent(row))
-        if others:
-            notes.append('Other websites of this Plesk subscription, migrated separately: ' + ', '.join(others)
-                         + ('' if site['webspace_id'] else
-                            ' (or together with this website as domains with their own folder: --subscription)'))
+    others = sorted(str(row['name']).lower() for row in domains if row['id'] != site['id'] and row['htype'] == 'vrt_hst'
+                    and (row['webspace_id'] or row['id']) == subscription_id and not str(row['name']).startswith('_.')
+                    and row['parent_id'] != site['id'] and not plesk_with_parent(by_id, row))
+    if others:
+        notes.append('Other websites of this Plesk subscription, each migrated as a website of its own: ' + ', '.join(others)
+                     + ('' if site['webspace_id'] else ' (all at once: --subscription)'))
     servers = {row['id']: row for row in grouped.get('dbserver', [])}
     charsets = {row['name']: row['charset'] for row in grouped.get('charset', [])}
     users = grouped.get('dbuser', [])
-    subscription_ids = {row['id'] for row in domains if (row['webspace_id'] or row['id']) == subscription_id}
-    if databases is None:
-        selected = [row for row in grouped.get('database', []) if row['dom_id'] == site['id']
-                    or subscription and row['dom_id'] in subscription_ids]
+    subscription = {row['id'] for row in domains if (row['webspace_id'] or row['id']) == subscription_id}
+    websites = plesk_websites(rows, subscription_id)
+    if databases is None and usage is not None and all(usage.get(path) is not None for path, name in websites.items() if name == domain):
+        selected = []
+        for row in grouped.get('database', []):
+            if row['dom_id'] not in subscription:
+                continue
+            name = row['name']
+            using = sorted({websites.get(path, path) for path, found in usage.items() if name in (found or [])})
+            assigned = by_id.get(row['dom_id'])
+            assigned = assigned and websites.get(str(assigned['www_root'] or '').rstrip('/'), str(assigned['name']).lower())
+            if not using:
+                # No website's configuration names it: where Plesk assigns it.
+                if assigned == domain:
+                    selected.append(row)
+                continue
+            # Used by several websites: with the one Plesk assigns it to, otherwise the first; the others point to its copy.
+            owner = assigned if assigned in using else using[0]
+            if owner == domain:
+                selected.append(row)
+                if len(using) > 1:
+                    notes.append('Database %s is also used by %s; it is migrated with this website: point %s to its new copy'
+                                 % (name, ', '.join(user for user in using if user != domain), 'them' if len(using) > 2 else 'it'))
+                elif assigned != domain:
+                    notes.append('Database %s (assigned to %s in Plesk) is migrated with this website, whose configuration uses it'
+                                 % (name, assigned or 'another domain'))
+            elif domain in using:
+                notes.append('Database %s is also used by this website, but migrated with %s: point this website to its new copy'
+                             % (name, owner))
+            elif assigned == domain:
+                notes.append('Database %s (assigned to this domain in Plesk) is used by %s and migrated with it' % (name, owner))
+    elif databases is None:
+        if usage is not None:
+            notes.append("The configuration of this website could not be read; its databases follow Plesk's assignment")
+        selected = [row for row in grouped.get('database', []) if row['dom_id'] == site['id']]
     else:
-        available = {row['name']: row for row in grouped.get('database', []) if row['dom_id'] in subscription_ids}
+        available = {row['name']: row for row in grouped.get('database', []) if row['dom_id'] in subscription}
         missing = sorted(set(databases) - set(available))
         require(not missing, 'Not a database of this Plesk subscription: %s (available: %s)' % (
             ', '.join(missing), ', '.join(sorted(available)) or 'none'))
         selected = [available[name] for name in sorted(set(databases))]
-    assigned = sorted(row['name'] for row in grouped.get('database', []) if row['dom_id'] in subscription_ids
-                      and (subscription or row['dom_id'] != site['id']) and row not in selected)
+    assigned = sorted(row['name'] for row in grouped.get('database', []) if row['dom_id'] in subscription
+                      and row['dom_id'] != site['id'] and row not in selected and not any(row['name'] + ' ' in note for note in notes))
     if assigned:
-        notes.append('Databases of %s, not migrated (select with --database): %s'
-                     % ('the subscription' if subscription else 'other websites of the subscription', ', '.join(assigned)))
+        notes.append('Databases of other websites of the subscription, not migrated (select with --database): ' + ', '.join(assigned))
     databases = []
     for db in sorted(selected, key=lambda row: row['name']):
         server = servers.get(db['server_id'], {})
@@ -851,8 +853,7 @@ def plesk_inventory(rows, account, domain, databases=None, subscription=False):
     cron, seen = [], set()
     skipped_cron = wordpress_cron = 0
     for job in parse_crontab(account['crontab']):
-        result = plesk_cron_job(job, home=home, entries=entries,
-                                folders=[(folder, 'web')] + [(source[len(home) + 1:], target) for source, target in copied])
+        result = plesk_cron_job(job, home=home, entries=entries, folders=[(folder, 'web')])
         owner = result.pop('owner')
         if owner == 'url':
             host = urllib.parse.urlsplit(result['url']).hostname or ''
@@ -889,8 +890,7 @@ def plesk_inventory(rows, account, domain, databases=None, subscription=False):
                  'subscription': next(str(row['name']) for row in domains if row['id'] == subscription_id)},
         'databases': databases, 'children': children, 'cron': cron, 'notes': notes,
         'not_copied': [entry for entry in entries if entry != folder and entry not in PLESK_SYSTEM_ENTRIES and entry not in other_folders],
-        'servers': [], 'dns_zones': [zone for index, zone in enumerate(zones)
-                                     if zone['id'] and zone['id'] not in [other['id'] for other in zones[:index]]],
+        'servers': [], 'dns_zones': [zone for zone in zones if zone['id']],
     }
 
 
@@ -940,19 +940,15 @@ def select_source(config, name):
 PATH_FILES = frozenset(('.htaccess', '.user.ini', 'php.ini', '.env', 'wp-config.php', 'wordfence-waf.php'))
 
 
-def old_path_references(tree, old_root, limit=200, *, tops=('web',)):
-    """Staged configuration files that still name the old webspace (reported, never changed).
-
-    tops: the document roots in the tree (web and the folders of domains with their own folder), whose PHP files count.
-    """
+def old_path_references(tree, old_root, limit=200):
+    """Staged configuration files that still name the old webspace (reported, never changed)."""
     needle = (old_root.rstrip('/') + '/').encode()
     found = []
-    roots = {Path(tree) / top for top in tops}
     for directory, dirs, files in os.walk(tree, followlinks=False):
         dirs.sort()
         for name in sorted(files):
             path = Path(directory) / name
-            top = path.parent in roots
+            top = path.parent == Path(tree) / 'web'
             if name not in PATH_FILES and not (top and name.endswith(('.php', '.ini'))):
                 continue
             with contextlib.suppress(OSError):
@@ -969,31 +965,29 @@ def old_path_references(tree, old_root, limit=200, *, tops=('web',)):
 PATH_FILES_RUNTIME = frozenset(('.user.ini', 'php.ini', 'wordfence-waf.php'))
 
 
-def rewrite_old_paths(tree, old_root, new_root, *, chroot=False, jail='/web', tops=('web',)):
+def rewrite_old_paths(tree, old_root, new_root, *, chroot=False):
     """Change the old document root to the new website's in the staged configuration files old_path_references scans.
 
     e.g. Wordfence's .user.ini auto_prepend_file and wordfence-waf.php, which name the Plesk httpdocs path.
-    new_root is the new folder (document_root + /web, or the folder of a domain with its own folder); under a PHP-FPM
-    chroot, PHP sees it as jail (/web). PHP-serialized strings (their stored length would no longer match) are left
-    for review. tops: as for old_path_references.
+    new_root is the new website's root (document_root + /web); under a PHP-FPM chroot, PHP sees it as /web.
+    PHP-serialized strings (their stored length would no longer match) are left for review.
     """
     old = old_root.rstrip('/').encode()
     pattern = re.compile(re.escape(old) + rb'(?![A-Za-z0-9._-])')
     serialized = re.compile(rb's:[0-9]+:"[^"]*' + re.escape(old))
     changed = []
-    roots = {Path(tree) / top for top in tops}
     for directory, dirs, files in os.walk(tree, followlinks=False):
         dirs.sort()
         for name in sorted(files):
             path = Path(directory) / name
-            top = path.parent in roots
+            top = path.parent == Path(tree) / 'web'
             if name not in PATH_FILES and not (top and name.endswith(('.php', '.ini'))):
                 continue
             runtime = name in PATH_FILES_RUNTIME or name.endswith('.ini')
             if name == '.htaccess':
                 target = new_root
             elif runtime:
-                target = jail if chroot else new_root
+                target = '/web' if chroot else new_root
             elif chroot:
                 continue
             else:
@@ -1245,7 +1239,7 @@ def nova_zone(zone, records, *, plesk_addresses, ipv4, ipv6, nameservers):
 class Migration:
     kind = 'ispconfig'
     dns = True  # Plesk: recreate the website's DNS zones on the new DNS server (--no-dns: not)
-    subscription = False  # --subscription (Plesk): the whole subscription as one website; kept in the state
+    peers = ()  # the other websites' migrations of the same run (--subscription)
     key_active = False  # the client-bound key is switched on
 
     def __init__(self, config, state_dir, domain, client_id):
@@ -1313,17 +1307,24 @@ class Migration:
 
     def source_inventory(self):
         require(self.databases is None or self.kind == 'plesk', '--database selects databases of a Plesk subscription (--from plesk)')
-        require(not self.subscription or self.kind == 'plesk', '--subscription migrates a Plesk subscription (--from plesk)')
         if self.kind == 'plesk':
             self.state['plesk'] = json.loads(self.plesk({'action': 'check'}))
             rows = json.loads(self.plesk({'action': 'inventory'}))['rows']
             site = plesk_site(rows, self.domain)
-            account = json.loads(self.plesk({'action': 'account', 'login': site['login'], 'home': site['home'].rstrip('/')}))
-            # Once chosen, later runs (--sync) keep the whole subscription without the option.
-            subscription = self.subscription or self.state.get('subscription', False)
-            inventory = plesk_inventory(rows, account, self.domain, self.databases, subscription)
-            if subscription:
-                self.state['subscription'] = True
+            home = site['home'].rstrip('/')
+            account = json.loads(self.plesk({'action': 'account', 'login': site['login'], 'home': home}))
+            selection, usage = self.databases, None
+            if selection is None and self.state['objects'] and 'inventory' in self.state:
+                # Objects were created for the databases chosen then: a resumed migration keeps them.
+                selection = [db['database_name'] for db in self.state['inventory']['databases']]
+            if selection is None:
+                subscription_id = site['webspace_id'] or site['id']
+                ids = {row['id'] for row in plesk_rows(rows).get('domain', []) if (row['webspace_id'] or row['id']) == subscription_id}
+                names = sorted(row['name'] for row in plesk_rows(rows).get('database', []) if row['dom_id'] in ids)
+                if names:
+                    usage = json.loads(self.plesk({'action': 'databases', 'login': site['login'], 'home': home, 'databases': names,
+                                                   'roots': sorted(plesk_websites(rows, subscription_id))}, log='plesk-databases.log'))['roots']
+            inventory = plesk_inventory(rows, account, self.domain, selection, usage)
             # Outside the site and children that identify created objects: a later change in Plesk is taken over.
             inventory['opcache'] = plesk_opcache(json.loads(self.plesk(plesk_php_request(rows, inventory))))
             return inventory
@@ -1337,13 +1338,7 @@ class Migration:
     def link_roots(self):
         """Old absolute paths and the staged folder that holds them, for normalize_links."""
         site = self.state['inventory']['site']
-        if self.kind == 'plesk':
-            return [(site['www_root'], 'web')] + own_folders(self.state['inventory'])
-        return [(site['document_root'], '')]
-
-    def website_folders(self):
-        """Folders of the new website the migration copies: web, private and those of domains with their own folder."""
-        return ['web', 'private'] + [folder for _, folder in own_folders(self.state['inventory'])]
+        return [(site['www_root'], 'web')] if self.kind == 'plesk' else [(site['document_root'], '')]
 
     def php_cli(self, php):
         """PHP CLI of the new website's PHP version for its cron jobs (server default: php)."""
@@ -1413,7 +1408,7 @@ class Migration:
         result = {}
         for child in self.state['inventory']['children']:
             version = child.get('php_version')
-            if self.php_version or child['type'] not in VHOST_CHILDREN or not version or version == website:
+            if self.php_version or child['type'] != 'vhostsubdomain' or not version or version == website:
                 continue
             rows = rows or self.admin.all('/servers/%d/php-versions' % self.target['web_server_id'])
             try:
@@ -1434,7 +1429,7 @@ class Migration:
         databases = [db['database_name'] for db in inventory['databases']]
         counts = {
             'web_domains': 0 if 'site' in objects else 1,
-            'web_alias_domains': sum(child['type'] in ('alias', 'vhostalias') for child in children),
+            'web_alias_domains': sum(child['type'] == 'alias' for child in children),
             'web_subdomains': sum(child['type'] in ('subdomain', 'vhostsubdomain') for child in children),
             'database_users': sum('user:' + name not in objects for name in databases),
             'databases': sum('db:' + name not in objects for name in databases),
@@ -1466,10 +1461,11 @@ class Migration:
     def allocation(self, summary):
         """Quotas of the migrated objects, checked against the measured source sizes.
 
-        Objects already created keep their quota on resume/sync, even when
-        their allocation now consumes the account's whole limit. New objects
-        receive the client's unallocated quota (product limits, not static
-        configuration). The API still enforces client/reseller caps on create.
+        Objects already created keep their quota on resume/sync, even when their allocation now consumes the account's
+        whole limit. A new website and new databases get twice their size, at least 1 GB, from the client's
+        unallocated quota (product limits, not static configuration), leaving the rest for other websites; the
+        website's traffic is the client's unallocated traffic, shared equally with the other websites of the same run
+        (peers) still to create. The API still enforces client/reseller caps on create.
         """
         objects = self.state['objects']
         sizes = self.state['source_size']
@@ -1478,11 +1474,25 @@ class Migration:
             value = int(value)
             return value if value > 0 else -1
 
+        # Other websites of the same run (--subscription) still to create keep room for their current sizes.
+        pending = [peer for peer in self.peers if 'source_size' in peer.state and 'site' not in peer.state['objects']]
         site = objects.get('site', {}).get('record')
         if site is not None:
             disk, traffic = unlimited(site['hd_quota']), unlimited(site.get('traffic_quota', -1))
         else:
             disk, traffic = available_disk_mb(summary, self.client_id), available_traffic_mb(summary, self.client_id)
+            if disk != -1:
+                others = [peer.state['source_size']['web_bytes'] for peer in pending]
+                wanted, others_wanted = reserved_mb(sizes['web_bytes']), sum(reserved_mb(size) for size in others)
+                if wanted + others_wanted > disk:
+                    # Not room for every reserve: shares of the reserves, leaving the others at least their sizes.
+                    share = max(disk * wanted // (wanted + others_wanted), size_mb(sizes['web_bytes']))
+                    wanted = min(share, disk - sum(size_mb(size) for size in others))
+                disk = wanted
+            if traffic != -1:
+                traffic //= 1 + len(pending)
+        others = [size for peer in self.peers if 'source_size' in peer.state
+                  for name, size in peer.state['source_size']['databases'].items() if 'db:' + name not in peer.state['objects']]
         databases, new = {}, {}
         for db in self.state['inventory']['databases']:
             name = db['database_name']
@@ -1491,7 +1501,7 @@ class Migration:
                 databases[name] = unlimited(record.get('database_quota', -1))
             else:
                 new[name] = sizes['databases'][name]
-        databases.update(database_quotas(summary, self.client_id, new))
+        databases.update(database_quotas(summary, self.client_id, new, others))
         require(disk == -1 or sizes['web_bytes'] <= disk * MB,
                 'Source files (%d MB) exceed the website disk quota (%d MB). Raise the client disk quota, then repeat the command; stopped before copying.'
                 % (-(-sizes['web_bytes'] // MB), disk))
@@ -1541,11 +1551,10 @@ class Migration:
         if self.kind == 'plesk':
             site = inventory['site']
             names = [db['database_name'] for db in inventory['databases']]
-            paths = [site['www_root']] + [source for source, _ in own_folders(inventory)]
-            result = json.loads(self.plesk({'action': 'size', 'login': site['system_user'], 'paths': paths,
+            result = json.loads(self.plesk({'action': 'size', 'login': site['system_user'], 'paths': [site['www_root']],
                                             'databases': names}, log='source-size.log'))
             require(set(result['databases']) == set(names), 'Could not measure the source databases')
-            return {'web_bytes': sum(int(result['paths'][path]) for path in paths),
+            return {'web_bytes': int(result['paths'][site['www_root']]),
                     'databases': {name: int(result['databases'][name]) for name in names}}
         root = inventory['site']['document_root']
         output = execute(remote(self.source['web_ssh'], ['du', '-sk', '--', root + '/web', root + '/private']),
@@ -1637,8 +1646,6 @@ class Migration:
             print('Source: Plesk %s on %s, subscription %s, read as its system user %s' % (
                 self.state['plesk']['version'].split()[0], self.source['ssh'], site['subscription'], site['system_user']))
             print('Web: %s → web/ on %s' % (site['www_root'], self.target['web_ssh']))
-            for source, folder in own_folders(inventory):
-                print('     %s → %s/' % (source, folder))
         else:
             print('Web: %s:%s → %s' % (self.source['web_ssh'], site['document_root'], self.target['web_ssh']))
         print('PHP: ' + ('%s (configuration ID %d)' % (php['version'], php['server_php_id']) if php['version'] else
@@ -1650,7 +1657,7 @@ class Migration:
                                              else hint))
             if 'opcache' in inventory:
                 own = {child['domain']: inventory['opcache'].get(child['domain']) for child in inventory['children']
-                       if child['type'] in VHOST_CHILDREN}
+                       if child['type'] == 'vhostsubdomain'}
                 differ = ['%s %s' % (name, opcache_text(value)) for name, value in sorted(own.items())
                           if (value != 'off') != (inventory['opcache'].get(self.domain) != 'off')]
                 print('OPcache: ' + opcache_text(inventory['opcache'].get(self.domain)) + ('; ' + '; '.join(differ) if differ else ''))
@@ -1680,7 +1687,7 @@ class Migration:
         if aliases:
             print('Aliases: ' + ', '.join(child['domain'] + (' (301 to %s)' % self.domain if child['redirect_type'] else '')
                                           + ('' if child['active'] == 'y' else ' (inactive)') for child in aliases))
-        subdomains = [child for child in inventory['children'] if child['type'] not in ('alias', 'vhostalias')]
+        subdomains = [child for child in inventory['children'] if child['type'] != 'alias']
         php = self.state.get('php_children', {})
 
         def folder(child):
@@ -1693,9 +1700,6 @@ class Migration:
         if subdomains:
             print('Subdomains: ' + ', '.join(child['domain'] + (folder(child) if child['type'] == 'vhostsubdomain' else ' (same folder)')
                                              for child in subdomains))
-        domains = [child for child in inventory['children'] if child['type'] == 'vhostalias']
-        if domains:
-            print('Domains with their own folder: ' + ', '.join(child['domain'] + folder(child) for child in domains))
         jobs = self.state['cron_jobs']
         if jobs:
             print('Cron jobs (%d created INACTIVE: enable them after the DNS switch):' % sum(job['create'] for job in jobs))
@@ -2033,12 +2037,12 @@ class Migration:
         require(site['domain'] == self.domain and site['server_id'] == self.target['web_server_id']
                 and site['system_group'] == 'client' + str(self.client_id), 'Target website identity changed')
         self.site = site
-        self.check_target(folders=False)  # the domains with their own folder are created next
+        self.check_target()
         self.take_over_opcache(site['id'], self.domain)
         for child in self.state['inventory']['children']:
             name = child['domain']
-            if child['type'] in VHOST_CHILDREN:
-                payload = {'domain': name, 'type': child['type'], 'parent_domain_id': site['id'], 'web_folder': child['web_folder'],
+            if child['type'] == 'vhostsubdomain':
+                payload = {'domain': name, 'type': 'vhostsubdomain', 'parent_domain_id': site['id'], 'web_folder': child['web_folder'],
                            'php': 'php-fpm', 'active': True, 'subdomain': child['subdomain'], 'ssl': False,
                            'ssl_letsencrypt': False, 'rewrite_to_https': False}
                 own = self.state.get('php_children', {}).get(str(child['domain_id']), {}).get('server_php_id')
@@ -2046,8 +2050,7 @@ class Migration:
                     payload['server_php_id'] = own or php_id
                 record = self.create('child:' + str(child['domain_id']), '/sites/web-domains', payload)
                 require(record['parent_domain_id'] == site['id'] and record['domain'] == name and record['web_folder'] == child['web_folder']
-                        and record['document_root'] == site['document_root'],
-                        'Target %s identity changed' % ('subdomain' if child['type'] == 'vhostsubdomain' else 'domain'))
+                        and record['document_root'] == site['document_root'], 'Target subdomain identity changed')
                 self.take_over_opcache(record['id'], name)
                 continue
             if child['type'] == 'subdomain':
@@ -2109,12 +2112,8 @@ class Migration:
             require(record['parent_domain_id'] == site['id'] and record['command'] == command, 'Target cron job changed')
         atomic_json(self.directory / 'database-map.json', self.state['databases'])
 
-    def files_command(self, *, folders=True):
-        identity = {field: self.site[field] for field in ('document_root', 'system_user', 'system_group')}
-        folders = self.website_folders()[2:] if folders and 'inventory' in self.state else []
-        if folders:
-            identity['folders'] = folders  # ISPConfig creates them with the domains; checked like web/ and private/
-        identity = json.dumps(identity)
+    def files_command(self):
+        identity = json.dumps({field: self.site[field] for field in ('document_root', 'system_user', 'system_group')})
         if self.local_web:
             return ['python3', str(HERE / 'target-files.py'), identity]
         code = base64.b64encode((HERE / 'target-files.py').read_bytes()).decode()
@@ -2151,9 +2150,9 @@ class Migration:
             return
         self.save()
 
-    def check_target(self, *, folders=True):
+    def check_target(self):
         self.check_web_server()
-        execute(self.web_command(self.files_command(folders=folders)), error_path=self.directory / 'target-files.log')
+        execute(self.web_command(self.files_command()), error_path=self.directory / 'target-files.log')
 
     @staticmethod
     def credentials(db):
@@ -2189,11 +2188,9 @@ class Migration:
             (tree / 'web').mkdir(exist_ok=True)
             # Read as the subscription's system user: a customer symlink cannot make root read other files.
             reader = ['setpriv', '--reuid=%d' % site['uid'], '--regid=%d' % site['gid'], '--clear-groups', '--no-new-privs', '--', 'rsync']
-            for source, folder in [(site['www_root'], 'web')] + own_folders(self.state['inventory']):
-                (tree / folder).mkdir(parents=True, exist_ok=True)
-                execute(RSYNC + ['--delete-delay', '--rsync-path=' + shlex.join(reader),
-                                 self.source['ssh'] + ':' + source + '/', str(tree / folder) + '/'],
-                        error_path=self.directory / 'rsync.log')
+            execute(RSYNC + ['--delete-delay', '--rsync-path=' + shlex.join(reader),
+                             self.source['ssh'] + ':' + site['www_root'] + '/', str(tree / 'web') + '/'],
+                    error_path=self.directory / 'rsync.log')
         else:
             root = site['document_root']
             for folder in ('web', 'private'):
@@ -2212,8 +2209,8 @@ class Migration:
         backup = round_dir / 'before'
         backup.mkdir(mode=0o700, exist_ok=True)
         transfer, target = self.target_rsync()
-        for folder in self.website_folders():
-            (backup / folder).mkdir(parents=True, exist_ok=True)
+        for folder in ('web', 'private'):
+            (backup / folder).mkdir(exist_ok=True)
             execute(transfer + [target + self.site['document_root'] + '/' + folder + '/',
                             str(backup / folder) + '/'], error_path=self.directory / 'rsync.log')
         for key, db in self.state['databases'].items():
@@ -2292,18 +2289,13 @@ class Migration:
         if self.kind == 'plesk':
             # e.g. Wordfence's .user.ini auto_prepend_file: PHP stops on the new server until the path is changed.
             site, target = self.state['inventory']['site'], self.state['objects']['site']['record']
-            pairs = [(site['www_root'], 'web')] + own_folders(self.state['inventory'])
-            tops = tuple(folder for _, folder in pairs)
-            rewritten = set()
-            for source, folder in pairs:
-                rewritten.update(rewrite_old_paths(tree, source, target['document_root'] + '/' + folder, jail='/' + folder, tops=tops,
-                                                   chroot=target.get('php_fpm_chroot') in (True, 'y')))
-            report['old_paths_rewritten'] = sorted(rewritten)
+            report['old_paths_rewritten'] = rewrite_old_paths(tree, site['www_root'], target['document_root'] + '/web',
+                                                              chroot=target.get('php_fpm_chroot') in (True, 'y'))
             if report['old_paths_rewritten']:
                 print('Old Plesk paths (%s) changed to the new website in: %s'
-                      % (', '.join(source for source, _ in pairs), ', '.join(report['old_paths_rewritten'])), flush=True)
+                      % (site['www_root'], ', '.join(report['old_paths_rewritten'])), flush=True)
             # What is left names the old webspace outside the copied document root (or needs review under a chroot).
-            report['old_path_references'] = old_path_references(tree, site['document_root'], tops=tops)
+            report['old_path_references'] = old_path_references(tree, site['document_root'])
             manual = manual + report['old_path_references']
         atomic_json(tree.parent / 'configuration-report.json', report)
         self.state['manual_configuration'] = bool(manual or missing)
@@ -2322,7 +2314,7 @@ class Migration:
         normalize_links(tree, self.link_roots())
         # Credential configurations MUST have been patched in the private staging tree first.
         transfer, target = self.target_rsync()
-        for folder in ['private'] + [name for name in self.website_folders() if name != 'private']:
+        for folder in ('private', 'web'):
             mode = 'Du=rwx,Dgo=,Fu=rw,Fgo=' if folder == 'private' else 'Du=rwx,Dgo=rx,Fu=rw,Fgo=r'
             execute(transfer + ['--chmod=' + mode, '--delete-delay', '--exclude=/.well-known/acme-challenge/',
                             str(tree / folder) + '/', target + self.site['document_root'] + '/' + folder + '/'],
@@ -2820,6 +2812,104 @@ def interactive(migration, *, sync=False):
     migration.run(sync=sync, source_quiesced=True, target_quiesced=sync, plan_ready=True)
 
 
+@contextlib.contextmanager
+def locked(state_dir):
+    """Exclusive use of a migration state directory."""
+    lock = os.open(state_dir / '.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(lock, 'w') as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise MigrationError('Another process is using the migration state ' + str(state_dir)) from None
+        yield
+
+
+def subscription_migrations(main, config, stack):
+    """The main domain's migration and those of the other websites of its Plesk subscription (--subscription), each a
+    website of its own with its own state directory (state_dir/DOMAIN), locked in stack. The websites are chosen once
+    and kept in the main domain's state."""
+    require(main.kind == 'plesk', '--subscription migrates a Plesk subscription (--from plesk)')
+    names = main.state.get('subscription')
+    require(names is not True,
+            'This migration was started by hosting 1.12.0, whose --subscription made the other websites domains with their '
+            'own folder. Delete the website %s with those domains in the panel, move %s aside, then start again.'
+            % (main.domain, main.directory))
+    if names is None:
+        rows = json.loads(main.plesk({'action': 'inventory'}))['rows']
+        names, skipped = plesk_subscription_websites(rows, main.domain)
+        for line in skipped:
+            print('Not migrated with the subscription: ' + line)
+        main.state['subscription'] = names
+        main.save()
+    migrations = [main]
+    for name in names:
+        directory = private_directory(state_root(config) / name)
+        stack.enter_context(locked(directory))
+        migration = Migration(config, directory, name, main.client_id)
+        migration.dns = main.dns
+        migrations.append(migration)
+    for migration in migrations:
+        migration.peers = [other for other in migrations if other is not migration]
+    print('Plesk subscription %s: %s (each a website of its own)' % (main.domain, ', '.join(m.domain for m in migrations)), flush=True)
+    return migrations
+
+
+def check_subscription_counts(migrations):
+    """The client's count limits for all websites still to create in this run (each plan checks only its own)."""
+    if len(migrations) > 1:
+        needed = {}
+        for migration in migrations:
+            for key, value in migration.needed_counts().items():
+                needed[key] = needed.get(key, 0) + value
+        check_counts(migrations[0].usage_summary(), needed)
+
+
+def interactive_subscription(migrations, *, sync=False):
+    """Every website of the Plesk subscription in one run: one copied or prepared before continues as on its own, the
+    others are planned together, confirmed once and migrated one after another. A website whose prepared files need a
+    review does not stop the others."""
+    pending = []
+    for migration in migrations:
+        phase = migration.state['phase']
+        if not sync and phase in ('copied', 'prepared'):
+            print('== %s' % migration.domain, flush=True)
+            interactive(migration)
+            continue
+        require(not sync or phase == 'copied', '%s: resume the unfinished migration by running the same command without --sync.'
+                % migration.domain)
+        pending.append(migration)
+    if not pending:
+        return
+    for migration in pending:
+        print('== %s' % migration.domain, flush=True)
+        migration.plan()
+    check_subscription_counts(pending)
+    names = ', '.join(migration.domain for migration in pending)
+    if sync:
+        confirm('The source snapshots will overwrite the targets of %s. Are writes and scheduled jobs stopped on BOTH sides? Start sync?' % names)
+    else:
+        confirm('Are writes and scheduled jobs stopped on the OLD sites (%s)? Start migration?' % names)
+    stopped = []
+    for migration in pending:
+        print('== %s' % migration.domain, flush=True)
+        try:
+            migration.run(sync=sync, source_quiesced=True, target_quiesced=sync, plan_ready=True)
+        except MigrationError as exc:
+            if migration.state['phase'] != 'prepared':
+                raise
+            print('STOP %s: %s' % (migration.domain, exc), flush=True)
+            stopped.append(migration.domain)
+    require(not stopped, 'Review the prepared files of %s, then run the same command again to publish them.' % ', '.join(stopped))
+
+
+def print_status(migration):
+    print('Domain: %s; phase: %s; round: %s' % (migration.domain, migration.state['phase'], migration.state['round']))
+    dns = migration.state.get('dns')
+    if dns:
+        print('DNS zones: %s %s' % ('created' if dns.get('done') else 'planned',
+                                    ', '.join(zone['origin'] for zone in dns['zones']) or '(none)'))
+
+
 def parse_args(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:2] == ['--simple', '--sites'] or argv[:1] == ['sites']:
@@ -2851,10 +2941,11 @@ def parse_args(argv=None):
         parser.add_argument('--state', help='Existing state directory from a manual migration; normally state_dir/DOMAIN')
         parser.add_argument('--php', metavar='VERSION', help='PHP version of the new website, e.g. 5.6 (default: target.server_php_id)')
         parser.add_argument('--database', action='append', metavar='NAME',
-                            help='Plesk: migrate exactly this database of the subscription (repeatable; default: those of the domain)')
+                            help='Plesk: migrate exactly this database of the subscription (repeatable; default: those its '
+                                 'configuration uses)')
         parser.add_argument('--subscription', action='store_true',
-                            help='Plesk: the whole subscription of this main domain as one website; its other websites become '
-                                 'domains with their own folder (kept for later runs)')
+                            help='Plesk: also the other websites of the subscription of this main domain, each a website of '
+                                 'its own, in one run (kept for later runs)')
         parser.add_argument('--dns', action='store_true',
                             help='Plesk: only create the DNS zones of the website, e.g. one copied earlier (with --plan: show them)')
         parser.add_argument('--no-dns', action='store_true', help='Plesk: do not create the DNS zones of the website')
@@ -2866,6 +2957,8 @@ def parse_args(argv=None):
             require(args.php is None or re.fullmatch(r'[0-9]+\.[0-9]+', args.php), '--php takes a version such as 5.6 or 8.3')
             require(not (args.dns and args.no_dns), '--dns and --no-dns exclude each other')
             require(not args.dns or args.command in ('interactive', 'plan'), '--dns goes alone or with --plan')
+            require(not args.subscription or (args.php is None and args.database is None),
+                    '--php and --database choose for one website; migrate the websites of the subscription separately to use them')
         except (MigrationError, ValueError) as exc:
             parser.error(str(exc))
         return args
@@ -2880,7 +2973,6 @@ def parse_args(argv=None):
     parser.add_argument('--config-reviewed', action='store_true', help='With publish: manually patched staged non-WordPress configs')
     parser.add_argument('--php', metavar='VERSION', help='With plan/run: PHP version of the new website, e.g. 5.6')
     parser.add_argument('--database', action='append', metavar='NAME', help='Plesk: migrate exactly this database (repeatable)')
-    parser.add_argument('--subscription', action='store_true', help='Plesk: the whole subscription as one website')
     parser.add_argument('--from', dest='source_name', metavar='NAME', help='Old server from "sources" in the configuration, e.g. plesk')
     parser.add_argument('--no-dns', action='store_true', help='Plesk: do not create the DNS zones of the website')
     return parser.parse_args(argv)
@@ -2914,20 +3006,34 @@ def main(argv=None):
             migration = Migration(config, state_dir, args.domain, args.client_id)
             migration.php_version = args.php
             migration.databases = args.database
-            migration.subscription = getattr(args, 'subscription', False)
             migration.dns = not args.no_dns
-            if getattr(args, 'dns', False):
+            if getattr(args, 'subscription', None) is not None and (args.subscription or 'subscription' in migration.state):
+                require(args.php is None and args.database is None,
+                        'This migration includes the other websites of the Plesk subscription; --php and --database choose for one website')
+                with contextlib.ExitStack() as stack:
+                    migrations = subscription_migrations(migration, config, stack)
+                    if args.dns:
+                        for each in migrations:
+                            print('== %s' % each.domain, flush=True)
+                            each.dns_only(plan_only=args.command == 'plan', interactive=True)
+                    elif args.command == 'plan':
+                        for each in migrations:
+                            print('== %s' % each.domain, flush=True)
+                            each.plan()
+                        check_subscription_counts([each for each in migrations if 'site' not in each.state['objects']])
+                    elif args.command == 'status':
+                        for each in migrations:
+                            print_status(each)
+                    else:
+                        interactive_subscription(migrations, sync=args.command == 'interactive_sync')
+            elif getattr(args, 'dns', False):
                 migration.dns_only(plan_only=args.command == 'plan', interactive=True)
             elif args.command == 'dns':
                 migration.dns_only()
             elif args.command == 'plan':
                 migration.plan()
             elif args.command == 'status':
-                print('Domain: %s; phase: %s; round: %s' % (migration.domain, migration.state['phase'], migration.state['round']))
-                dns = migration.state.get('dns')
-                if dns:
-                    print('DNS zones: %s %s' % ('created' if dns.get('done') else 'planned',
-                                                ', '.join(zone['origin'] for zone in dns['zones']) or '(none)'))
+                print_status(migration)
             elif args.command == 'publish':
                 migration.publish(config_reviewed=args.config_reviewed)
             elif args.command in ('interactive', 'interactive_sync'):

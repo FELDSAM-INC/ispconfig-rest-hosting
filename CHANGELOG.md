@@ -5,6 +5,33 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `ispcp-migrate --from plesk example.com CLIENT --subscription` migrates the subscription's other websites
+  (additional domains, subdomains with a folder of their own) in the same run, each as a **website of its own**
+  (system user, quota, cgroups, databases, cron jobs, PHP and DNS zones), instead of 1.12.0's domains with their own
+  folder of one website. The run plans every website, checks the client's limits for all of them, asks once and
+  migrates them one after another; a website waiting for the review of its prepared files does not stop the others.
+  The websites are kept in the main domain's state for `--sync` and `--status`.
+- A new website gets twice the size of its files as disk quota, at least 1 GB, and a new database twice its size, at
+  least 1 GB; the rest of the client's quota stays free for other websites. Before, a migrated website took the
+  client's whole unallocated disk quota (e.g. 20 GB) and its databases the whole database quota. When the client's
+  quota cannot hold the reserves, it is shared among the websites and databases still to create.
+
+### Fixed
+
+- A Plesk website takes the databases its configuration uses (`wp-config.php` and other configuration files, read
+  on Plesk as the subscription's user), and those Plesk assigns to it that no website's configuration names. Plesk
+  often assigns all of a subscription's databases to its main domain, so migrating the main domain took the other
+  websites' databases too. A migration that has already created objects keeps the databases it chose.
+
+### Upgrade notes
+
+- `ispconfig-rest extension:update hosting --tag v1.13.0`, then
+  `ispconfig-rest server-tools update --components migration --server <id>` (the Plesk helper reads the websites'
+  configuration). No database migration. A migration started with 1.12.0's `--subscription` stops with instructions:
+  delete its website with its domains in the panel and move its state directory aside before starting again.
+
 ## [1.12.0] - 2026-11-13
 
 ### Added

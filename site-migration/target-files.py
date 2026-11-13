@@ -34,15 +34,10 @@ def enter(site):
     os.setgroups([])
     os.setgid(group.gr_gid)
     os.setuid(user.pw_uid)
-    # Folders of the website's domains with their own folder (created by ISPConfig with the domain).
-    folders = site.get('folders', [])
-    if not isinstance(folders, list) or not all(isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]*(?:/[A-Za-z0-9_][A-Za-z0-9._-]*)*', name)
-                                                and '..' not in name for name in folders):
-        raise ValueError('Invalid website folders')
-    for name in ['web', 'private'] + folders:
+    for name in ('web', 'private'):
         entry = os.lstat(name)
         if not stat.S_ISDIR(entry.st_mode) or entry.st_uid != user.pw_uid:
-            raise ValueError('Website folder %s is not a directory owned by the website user' % name)
+            raise ValueError('Website folder is not a directory owned by the website user')
 
 
 if __name__ == '__main__':

@@ -115,6 +115,70 @@ def size(request):
     return {'paths': sizes, 'databases': databases}
 
 
+# Application configuration below a document root (besides its own PHP, ini and .env files): Joomla, PrestaShop,
+# Magento, Drupal, CodeIgniter, osCommerce and Symfony.
+CONFIG_FILES = ('app/config/parameters.php', 'app/config/parameters.yml', 'config/settings.inc.php', 'app/etc/env.php',
+                'sites/default/settings.php', 'application/config/database.php', 'app/Config/Database.php',
+                'includes/configure.php', 'config/database.php')
+CONFIG_LIMIT = 1048576
+
+
+def names_in(text, pattern):
+    """The database names the pattern finds in a configuration file, except as a user name: Plesk's database users are
+    often named like databases (wp-config.php: define('DB_USER', 'example_wordpress_8'), another website's database)."""
+    found = set()
+    for match in pattern.finditer(text):
+        line = text[text.rfind('\n', 0, match.start()) + 1:match.start()].lower()
+        if 'user' not in line and 'login' not in line:
+            found.add(match.group(1))
+    return found
+
+
+def databases(request):
+    """Which of the subscription's databases the configuration of each document root names: its PHP, ini and .env
+    files and the usual application configuration files, read as the subscription's system user. Only the database
+    names found leave the server (configuration files hold passwords)."""
+    login, home = request['login'], request['home']
+    names, roots = request['databases'], request['roots']
+    if not LOGIN.match(login) or not isinstance(names, list) or not all(isinstance(name, str) and DATABASE.match(name) for name in names):
+        fail('Invalid request')
+    if not isinstance(roots, list) or len(roots) > 200 or not all(isinstance(root, str) for root in roots):
+        fail('Invalid document roots')
+    user = pwd.getpwnam(login)
+    if user.pw_uid < 500 or user.pw_dir.rstrip('/') != home:
+        fail('The system user does not own this webspace')
+    found = dict((root, []) for root in roots)
+    if not names:
+        return {'roots': found}
+    # A name as a whole word: dusinsk_wordpress_8 is not in dusinsk_wordpress_80.
+    pattern = re.compile('(?<![A-Za-z0-9_-])(%s)(?![A-Za-z0-9_-])' % '|'.join(re.escape(name) for name in sorted(names, key=len, reverse=True)))
+    for root in roots:
+        if not root.startswith(home + '/') or '/../' in root + '/' or '//' in root:
+            found[root] = None
+            continue
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            found[root] = None
+            continue
+        files = [entry for entry in entries if entry.endswith(('.php', '.ini', '.inc')) or entry == '.env'][:200] + list(CONFIG_FILES)
+        names_found = set()
+        for relative in files:
+            path = root + '/' + relative
+            try:
+                if not stat.S_ISREG(os.lstat(path).st_mode):
+                    continue
+            except OSError:
+                continue
+            # As the subscription's user: a customer symlink cannot make root read other files.
+            result = run(['setpriv', '--reuid=%d' % user.pw_uid, '--regid=%d' % user.pw_gid, '--clear-groups', '--no-new-privs',
+                          '--', 'head', '-c', str(CONFIG_LIMIT), '--', path])
+            if result.returncode == 0:
+                names_found.update(names_in(result.stdout.decode('utf-8', 'replace'), pattern))
+        found[root] = sorted(names_found)
+    return {'roots': found}
+
+
 def root_text(path):
     """A configuration file only root can change (no symlink for the per-domain file), or None."""
     try:
@@ -238,6 +302,8 @@ def main():
         result = size(request)
     elif action == 'php':
         result = php(request)
+    elif action == 'databases':
+        result = databases(request)
     elif action == 'dns':
         zones = request['zones']
         if not isinstance(zones, list) or not all(type(zone) is int and zone > 0 for zone in zones):

@@ -81,9 +81,15 @@ Every quota follows the client's product allowance in the new ISPConfig, never a
 The plan reads `/usage/summary?client_id=ID` and uses the client's limit minus the quotas already allocated
 to other objects (allocated quotas, not measured usage):
 
-- website disk quota (`hd_quota`) and monthly traffic quota (`traffic_quota`);
-- database quota (`database_quota`): the unallocated database quota is split across the migrated databases in
-  proportion to their source size. With one database it receives the whole unallocated quota.
+- website disk quota (`hd_quota`): twice the size of the source files, at least 1 GB; the rest of the client's
+  quota stays free for other websites;
+- monthly traffic quota (`traffic_quota`): the unallocated traffic (shared equally by the websites of one
+  `--subscription` run);
+- database quota (`database_quota`): twice each database's source size, at least 1 GB.
+
+When the unallocated quota cannot hold these reserves (also those of the other websites of a `--subscription` run
+still to create), it is split among them in proportion to their reserves (disk) or source sizes (databases), so each
+receives at least its current size.
 
 An unlimited allowance produces `-1` (unlimited). Before the first write, the plan also measures the source
 (`du -sk` of `web` and `private` on the old web server, and `data_length + index_length` per source database,
@@ -225,7 +231,7 @@ ispcp-migrate --sites --from plesk              # which Plesk websites are live 
 ispcp-migrate --from plesk example.com 123 --plan
 ispcp-migrate --from plesk example.com 123 --php 8.2   # another PHP version than on Plesk
 ispcp-migrate --from plesk example.com 123 --dns       # only the DNS zones (e.g. of a website copied earlier)
-ispcp-migrate --from plesk example.com 123 --subscription  # the whole subscription as one website, see below
+ispcp-migrate --from plesk example.com 123 --subscription  # with the subscription's other websites, see below
 ```
 
 What is migrated, per Plesk domain with website hosting (a suspended or disabled domain stops the plan):
@@ -237,36 +243,38 @@ What is migrated, per Plesk domain with website hosting (a suspended or disabled
 | Domain alias used for the website | Alias domain; Plesk's SEO-safe 301 becomes a 301 redirect to `[scheme]://example.com/` |
 | Subdomain in the same folder | Subdomain |
 | Subdomain with its folder inside the document root (`httpdocs/blog`) | Subdomain with its own web folder (`web/blog`) |
-| Local MySQL/MariaDB databases Plesk assigns to the domain | New databases and users; WordPress configs using any of the database's Plesk users are updated |
+| Local MySQL/MariaDB databases of the subscription the website's configuration uses (Plesk's assignment for those no website's configuration names) | New databases and users; WordPress configs using any of the database's Plesk users are updated |
 | Cron jobs of the subscription's system user | ISPConfig cron jobs, created **inactive** |
 | PHP version of the domain and of each subdomain with its own folder (`alt-php74-fpm` → 7.4) | The same PHP version on the new web server |
 | OPcache of the domain and of each subdomain with its own folder | The same in the website's PHP settings (on when Plesk does not tell) |
 | DNS zones of the domain, its aliases and subdomains that public DNS delegates to Plesk | DNS zones of the client on its DNS server, see below |
 
-The plan lists everything else: subdomains or additional domains of the subscription with their own folder
-(migrate each one separately, `ispcp-migrate --from plesk sub.example.com 123`, or all with `--subscription`), aliases
-used only for mail or DNS,
-forwarding subdomains, files of the webspace outside the document root (e.g. `wordpress-backups`), and databases
-assigned to another domain of the subscription. Plesk often assigns all databases to the subscription's main
-domain: `--database NAME` (repeatable) migrates exactly these databases of the subscription instead, e.g. the one an
-additional domain's WordPress uses. Other per-domain PHP settings, mail, certificates and Plesk extensions (WP Toolkit,
-Imunify) are not migrated.
+The plan lists everything else: subdomains or additional domains of the subscription with their own folder (each
+a website of its own: `ispcp-migrate --from plesk sub.example.com 123`, or all at once with `--subscription`),
+aliases used only for mail or DNS, forwarding subdomains, files of the webspace outside the document root (e.g.
+`wordpress-backups`), and the subscription's databases that go with another website.
 
-**Whole subscription (`--subscription`).** For the subscription's main domain, the subscription becomes one website
-as in Plesk's webspace: one system user and disk quota, all of the subscription's databases and cron jobs. Its
-additional domains and subdomains with a folder of their own become domains with their own folder of the website
-(ISPConfig `vhostalias`, a subdomain of the main domain `vhostsubdomain`), each in the folder it has in the webspace:
-`/var/www/vhosts/example.com/shop.example` → `shop.example/` next to `web/`, the folder the panel gives a domain with
-its own folder. Each keeps its Plesk PHP version and OPcache and gets its own DNS zone and certificate in the panel;
-one in the main domain's folder becomes an alias (or subdomain) of the website, one inside another copied folder
-comes with that folder. The folders are copied, backed up and published like `web/`, with their old paths in
-configuration files changed to the new folder. Not migrated, and listed in the plan: aliases of the additional
-domains (add them in the panel), disabled or forwarding domains, the wildcard subdomain of an additional domain and
-a folder the new website cannot have (outside the webspace, shared by two domains, or one of ISPConfig's folders such
-as `web`, `private`, `log`, `bin` or `etc`). The domains count against the client's alias domain and subdomain limits.
-Later runs (`--sync`) keep the whole subscription without the option. A migration started without it has to be
-started again: delete the new website with its databases and database users, move the state directory aside and run
-the command with `--subscription`.
+**Databases.** Plesk often assigns all databases of a subscription to its main domain, whichever website uses them.
+The helper therefore reads, as the subscription's system user, the configuration of every website of the
+subscription (the PHP, ini and `.env` files of each document root and the usual application configuration files
+such as `wp-config.php`, `configuration.php` or `app/etc/env.php`); only the database names found leave the Plesk
+server. A website takes the databases its configuration names, and those Plesk assigns to it that no website's
+configuration names. A database several websites use goes with the one Plesk assigns it to (otherwise the first);
+the plan tells the others to point to its new copy. When the website's configuration cannot be read, Plesk's
+assignment decides. `--database NAME` (repeatable) migrates exactly these databases of the subscription instead.
+A migration that has already created objects keeps the databases it chose.
+
+**Whole subscription (`--subscription`).** For the subscription's main domain, its other websites (additional
+domains, and subdomains with a folder of their own outside the main document root) are migrated in the same run,
+each as a website of its own with its own system user, quota, databases, cron jobs, PHP version and DNS zones, and
+each with its own state directory (`state_dir/DOMAIN`). The run plans all of them, checks the client's limits for
+all of them, asks once and migrates one after another; a website whose prepared files need review does not stop the
+others (run the same command again after the review). The websites are kept in the main domain's state, so
+`--sync` and `--status` of the main domain cover all of them. `--php` and `--database` choose for one website and
+need separate migrations. A migration started by hosting 1.12.0's `--subscription` (domains with their own folder)
+stops: delete its website with those domains in the panel, move its state directory aside and start again.
+
+Other per-domain PHP settings, mail, certificates and Plesk extensions (WP Toolkit, Imunify) are not migrated.
 
 **OPcache.** New websites start with the API's new-site PHP defaults, which switch OPcache off; a website that ran
 with OPcache needs much more memory without it (a WordPress homepage went from 46 MB to 127 MB and hit the 128 MB
@@ -529,13 +537,13 @@ the subscription's system user and crontab, the administrator password file): `-
 reads as the subscription user (a root-only file stops the copy), dumps as the Plesk administrator including a
 database name with a hyphen, the wildcard, the alias redirect, a subdomain folder, an inactive cron job with
 rewritten paths, the PHP version, the old-path review, WordPress configuration, the DNS zone of a domain public DNS
-delegates to Plesk (and not of its alias hosted elsewhere) and a final sync, then the whole subscription
-(`--subscription`: the additional domain's folder with its links, old paths, cron job and PHP, backed up and synced
-again), and that nothing is written on the Plesk side. `MigrationProvisioningTest` also provisions a Plesk inventory through the real API, including the
+delegates to Plesk (and not of its alias hosted elsewhere), the database of an additional domain's `wp-config.php`
+left to that domain although Plesk assigns it to the main domain, and a final sync; then the whole subscription
+(`--subscription`: two websites of their own in one run with their databases and cron job, a review that does not
+stop the other), and that nothing is written on the Plesk side. `MigrationProvisioningTest` also provisions a Plesk inventory through the real API, including the
 wildcard and cron limits that stop before any write, the PHP versions of the website and its subdomain, and DNS
 zones with SPF, DMARC, DKIM, MX, SRV and delegation records (created inactive, switched on complete, checked by
-replaying the journal like ISPConfig's DNS server, and the client's DNS zone limit), an alias zone kept in step
-with the domain's through the alias's DNS synchronization, and the domains with their own folder of a whole
-subscription (folder, PHP, OPcache, alias domain limit).
+replaying the journal like ISPConfig's DNS server, and the client's DNS zone limit), and an alias zone kept in step
+with the domain's through the alias's DNS synchronization.
 These tests are **not a live ISPConfig instance**. A first production migration must
 start with `plan` and an application test before DNS changes.
