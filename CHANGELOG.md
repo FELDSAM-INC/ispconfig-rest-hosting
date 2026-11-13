@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-11-13
+
 ### Added
 
 - `ispcp-migrate --from plesk example.com CLIENT --subscription` migrates a whole Plesk subscription as one website,
@@ -18,6 +20,13 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 - A migration whose earlier runs created nothing yet (e.g. only `--plan`) takes over a changed source inventory
   instead of stopping, so options such as `--subscription` or `--database` can still change.
+
+### Upgrade notes
+
+- `ispconfig-rest extension:update hosting --tag v1.12.0`, then
+  `ispconfig-rest server-tools update --components migration --server <id>`. No database migration. A migration of a
+  subscription's main domain started without `--subscription` keeps its inventory; to migrate the whole subscription,
+  delete the new website with its databases and database users, move the state directory aside and start again.
 
 ## [1.11.2] - 2026-11-13
 
