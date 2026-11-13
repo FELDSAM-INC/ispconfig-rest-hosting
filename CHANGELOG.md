@@ -5,6 +5,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-11-13
+
 ### Fixed
 
 - `ispcp-migrate --from plesk` gives the new website, and each subdomain with its own folder, OPcache as Plesk ran
@@ -13,6 +15,12 @@ versions follow [Semantic Versioning](https://semver.org/).
   WordPress site with many plugins then needed 127 MB instead of 46 MB for its homepage, exceeded the 128 MB memory
   limit and answered 503. The plan shows the setting; it is applied once through the website's PHP settings, so a
   change made in the panel stays during sync rounds.
+
+### Upgrade notes
+
+- `ispconfig-rest extension:update hosting --tag v1.11.0`, then update the migration tool on the web server that
+  runs migrations: `ispconfig-rest server-tools update --components migration --server <id>`. No database migration.
+- Websites migrated with 1.8.0–1.10.0 keep OPcache off; switch it on in the panel where Plesk had it on.
 
 ## [1.10.0] - 2026-11-12
 
