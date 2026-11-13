@@ -697,7 +697,12 @@ def plesk_inventory(rows, account, domain, databases=None):
                          '(ispcp-migrate --from plesk %s CLIENT_ID)' % (name, name))
     for alias in sorted((row for row in grouped.get('alias', []) if row['dom_id'] == site['id']), key=lambda row: row['name']):
         name = str(alias['name']).lower()
-        zones.append({'id': alias.get('dns_zone_id'), 'domain': name, 'role': 'alias'})
+        zone = {'id': alias.get('dns_zone_id'), 'domain': name, 'role': 'alias'}
+        if alias.get('dns') == 'true':
+            # Plesk keeps this zone a copy of the domain's ("Synchronize DNS zone with the primary domain"); the new
+            # ISPConfig does that for the zone of a website alias (dns_sync), hence the alias it belongs to.
+            zone.update({'sync': True, 'child': 'a%d' % alias['id'] if alias['web'] == 'true' else None})
+        zones.append(zone)
         if alias['web'] != 'true':
             notes.append('Alias %s is not used for the website (mail/DNS only) and is not migrated' % name)
             continue
@@ -1338,9 +1343,17 @@ class Migration:
         if not plan or plan.get('done'):
             return {}
         objects = self.state['objects']
+        zones = {zone['origin']: zone for zone in plan['zones']}
+
+        def records(zone):
+            if zone.get('sync'):  # the API copies the records of the domain's zone
+                source = zones[zone['sync']]
+                return 0 if 'zone:' + zone['origin'] in objects else len(source['records']) - len(source.get('rejected', []))
+            return sum('rr:%s:%d' % (zone['origin'], index) not in objects and index not in zone.get('rejected', [])
+                       for index in range(len(zone['records'])))
+
         return {'dns_zones': sum('zone:' + zone['origin'] not in objects for zone in plan['zones']),
-                'dns_records': sum('rr:%s:%d' % (zone['origin'], index) not in objects and index not in zone.get('rejected', [])
-                                   for zone in plan['zones'] for index in range(len(zone['records'])))}
+                'dns_records': sum(records(zone) for zone in plan['zones'])}
 
     def allocation(self, summary):
         """Quotas of the migrated objects, checked against the measured source sizes.
@@ -1628,6 +1641,7 @@ class Migration:
         hosting = self.hosting_addresses()
         names = [server['name'] for server in hosting['nameservers']]
         plan = dict(hosting, zones=[], skipped=[])
+        synchronized, primary = [], None
         for entry in zones:
             zone = found.get(entry['id'])
             if zone is None:
@@ -1652,6 +1666,22 @@ class Migration:
             copy = nova_zone(zone, records.get(zone['id'], []), plesk_addresses=addresses, ipv4=hosting['ipv4'],
                              ipv6=hosting['ipv6'], nameservers=names)
             copy['soa']['server_id'] = hosting['server_id']
+            if entry.get('sync'):
+                synchronized.append((entry, copy))
+                continue
+            if entry['role'] == 'website':
+                primary = origin
+            plan['zones'].append(copy)
+        # A zone Plesk keeps in step with the domain's: the API copies the domain's zone once it is complete and keeps
+        # the alias's in step (dns_sync, spec 045), so these come after it. Otherwise it is Plesk's copy, on its own.
+        for entry, copy in synchronized:
+            if primary and entry.get('child'):
+                plan['zones'].append({'origin': copy['origin'], 'sync': primary, 'child': entry['child'],
+                                      'records': [], 'remapped': [], 'rewritten': [], 'manual': []})
+                continue
+            copy['unsynced'] = 'Plesk keeps it in step with %s; created as a zone of its own (%s)' % (
+                self.domain, 'the alias is not migrated for the website' if not entry.get('child')
+                else 'the zone of %s is not created by this migration' % self.domain)
             plan['zones'].append(copy)
         return plan
 
@@ -1673,10 +1703,16 @@ class Migration:
         if plan['zones']:
             print('DNS zones (created %s; name servers %s):' % (when, servers))
         for zone in plan['zones']:
+            if zone.get('sync'):
+                print('  %s: a copy of %s kept in step, as in Plesk (names under %s become %s)'
+                      % (zone['origin'], zone['sync'], zone['sync'], zone['origin']))
+                continue
             changes = sorted({'%s -> %s' % (item['old'], item['new']) for item in zone['remapped']})
             names = sorted({item['name'] for item in zone['remapped']})
             print('  %s: %d records%s' % (zone['origin'], len(zone['records']), '; A/AAAA of the Plesk server (%s) become the new '
                                           'web server\'s for: %s' % (', '.join(changes), ', '.join(names)) if names else ''))
+            if zone.get('unsynced'):
+                print('  %s: %s' % (zone['origin'], zone['unsynced']))
             for item in zone.get('rewritten', []):
                 print('  %s: ISPConfig writes "%s" as "%s"' % (item['name'], item['old'], item['new']))
             for record in zone['manual']:
@@ -1699,6 +1735,9 @@ class Migration:
             return
         self.use_client_key()
         for zone in plan['zones']:
+            if zone.get('sync'):
+                self.sync_alias_zone(zone)
+                continue
             name = 'zone:' + zone['origin']
             record = self.create(name, '/dns/soa', zone['soa'], wait=False)
             require(str(record['origin']).lower() == zone['soa']['origin'], 'DNS zone identity changed')
@@ -1732,6 +1771,27 @@ class Migration:
         plan['done'] = True
         self.save()
         self.verify_dns(plan)
+
+    def sync_alias_zone(self, zone):
+        """The zone of a website alias Plesk keeps in step with the domain's: switching on the alias's DNS
+        synchronization copies the domain's zone, now complete and switched on, with the alias for the domain in record
+        names and targets, and keeps it so (spec 045). Repeating it changes nothing."""
+        name = 'zone:' + zone['origin']
+        objects = self.state['objects']
+        if name not in objects:
+            alias = objects.get('child:' + zone['child'], {}).get('record')
+            require(alias is not None, 'The alias %s is not created yet; complete the migration first' % zone['origin'])
+            record, change = self.api.request('PUT', '/sites/web-child-domains/%d' % alias['id'], {'dns_sync': True})
+            services = record.get('alias_services') or {}
+            require(record.get('domain') == zone['origin'] and services.get('dns_sync') is True and services.get('dns_zone_id')
+                    and services.get('primary_domain') == zone['sync'], 'DNS synchronization of %s was not switched on' % zone['origin'])
+            objects[name] = {'endpoint': '/dns/soa', 'record': {'id': int(services['dns_zone_id']), 'origin': zone['origin'] + '.'},
+                             'change': change}
+            self.save()
+        entry = objects[name]
+        self.api.wait(entry.get('change'))
+        print('DNS zone created: %s (zone ID %d, kept in step with %s as in Plesk)' % (zone['origin'], entry['record']['id'], zone['sync']),
+              flush=True)
 
     def verify_dns(self, plan, attempts=12):
         """Ask the new DNS server itself whether it answers for every created zone."""

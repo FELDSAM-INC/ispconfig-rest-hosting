@@ -5,6 +5,22 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `ispcp-migrate --from plesk` keeps the DNS zone of a domain alias in step with the domain's when Plesk does
+  (*Synchronize DNS zone with the primary domain*, e.g. an alias `example.sk` of `example.com`): once the domain's zone
+  is created, the alias's DNS synchronization is switched on, so the alias's zone is a read-only copy of the domain's,
+  as in the panel. Before, Plesk's copy became a zone of its own and later changes of the domain's zone did not reach
+  it. Without the domain's zone in the migration, or for an alias used only for mail or DNS, the zone is still copied
+  on its own, and the plan says so.
+
+### Upgrade notes
+
+- `ispconfig-rest extension:update hosting --tag <version>`, then
+  `ispconfig-rest server-tools update --components migration --server <id>` (the Plesk helper also reads the alias's
+  DNS switch). No database migration. Aliases migrated before keep zones of their own; switch on the alias's DNS
+  synchronization in the panel where Plesk had it.
+
 ## [1.11.0] - 2026-11-13
 
 ### Fixed

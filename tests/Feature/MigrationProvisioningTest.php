@@ -426,7 +426,8 @@ PY;
         .'tmeiZM8QEwmL9hd+zDVi8ik1eK0fXEOVJp+E3igm73N36AHe2U+o//Cva02nN2glEVwxIciRO/8bc2Ls/yDLV/REBR6EgsptCMu7A940sOMCcvr0Lf/Sbn+9ajd8R'
         .'wnyCk+cQSRGqK8W+Y/PNsKRXmpDcQ4hVqB6V/c3qbUNblbQIDAQAB';
 
-    public function test_plesk_dns_zones_pass_the_api_and_are_switched_on_complete(): void
+    /** The client's DNS server ns1.target.test (server 3, with ns2.target.test as its slave) and the web server's addresses. */
+    private function dnsServer(): void
     {
         ServerSchema::create();  // server_ip
         DB::table('server')->insert(['server_id' => 3, 'server_name' => 'ns1.target.test', 'web_server' => 0, 'mail_server' => 0,
@@ -436,6 +437,11 @@ PY;
         }
         DB::table('sys_ini')->where('sysini_id', 1)->update(['config' => "[sites]\ndefault_remote_dbserver=\n[dns]\ndns_external_slave_fqdn=ns2.target.test\n"]);
         $this->assignServers('clientB', ['web' => [1], 'db' => [1], 'dns' => [3]]);
+    }
+
+    public function test_plesk_dns_zones_pass_the_api_and_are_switched_on_complete(): void
+    {
+        $this->dnsServer();
         $this->setClientLimit('clientB', 'limit_dns_zone', 2);
         $this->setClientLimit('clientB', 'limit_dns_record', 40);
         $request = $this->pleskMigration([]);
@@ -499,6 +505,63 @@ PY;
         $this->assertFalse($refused['ok']);
         $this->assertStringStartsWith('Client limit for DNS zones is too small: limit 1, used 0, migration needs 2 more.', $refused['error']);
         $this->assertSame([], $this->writes($calls));
+    }
+
+    public function test_a_plesk_alias_zone_kept_in_step_with_the_domain_follows_its_zone(): void
+    {
+        $this->dnsServer();
+        foreach (['limit_web_aliasdomain' => 1, 'limit_web_subdomain' => 2, 'limit_database' => 2, 'limit_database_user' => 2,
+            'limit_dns_zone' => 2, 'limit_dns_record' => 28] as $limit => $value) {
+            $this->setClientLimit('clientB', $limit, $value);
+        }
+        DB::table('client')->where('client_id', $this->tenant('clientB')['client_id'])->update(['limit_wildcard' => 'y']);
+        foreach ($this->phpVersions([['PHP 8.1', '8.1', 'y', 0], ['PHP 7.4', '7.4', 'y', 0]]) as $id) {
+            DB::table('api_web_php_defaults')->insert(['server_id' => 1, 'server_php_id' => $id, 'mode' => 'fpm', 'measured_at' => time(),
+                'settings' => json_encode(['opcache' => true, 'scan' => [], 'values' => ['opcache.enable' => 'on', 'disable_functions' => '']])]);
+        }
+        // Plesk's "Synchronize DNS zone with the primary domain" on the alias shop.example (plesk_inventory()).
+        $request = $this->pleskMigration([]);
+        $request['inventory']['dns_zones'] = [['id' => 31, 'domain' => 'shop.test', 'role' => 'website'],
+            ['id' => 32, 'domain' => 'shop.example', 'role' => 'alias', 'sync' => true, 'child' => 'a1']];
+        $request['dns'] = $this->pleskDns();
+
+        [$result, $calls] = $this->runMigration($request);
+
+        $this->assertTrue($result['ok'], $result['error'] ?? '');
+        $this->assertTrue($result['state']['dns']['done']);
+        $zones = DB::table('dns_soa')->orderBy('origin')->get()->keyBy('origin');
+        $this->assertSame(['shop.example.', 'shop.test.'], $zones->keys()->all());
+        foreach ($zones as $zone) {
+            $this->assertSame(['ns1.target.test.', 'admin.provider.test.', 'Y', 3, $this->tenant('clientB')['groupid']],
+                [$zone->ns, $zone->mbox, $zone->active, (int) $zone->server_id, (int) $zone->sys_groupid]);
+        }
+        // The alias's zone is the domain's, with the alias for the domain in names and targets, and the API keeps it so.
+        $records = fn (string $origin, string $as): array => DB::table('dns_rr')->where('zone', $zones[$origin]->id)->get()
+            ->map(fn ($rr) => str_replace($origin, $as, implode(' ', [$rr->name, $rr->type, $rr->data, (int) $rr->aux, (int) $rr->ttl, $rr->active])))
+            ->sort()->values()->all();
+        $this->assertCount(13, $records('shop.test.', 'shop.test.'));
+        $this->assertSame($records('shop.test.', 'ORIGIN'), $records('shop.example.', 'ORIGIN'));
+        $alias = DB::table('web_domain')->where('type', 'alias')->first();
+        $link = DB::table('api_alias_services')->where('web_domain_id', $alias->domain_id)->first();
+        $this->assertSame([(int) $zones['shop.example.']->id, (int) $zones['shop.test.']->id, 'shop.test', 1],
+            [(int) $link->dns_zone_id, (int) $link->primary_zone_id, $link->primary_domain, (int) $link->dns_sync]);
+        // Switched on with the client's key once the domain's zone is complete and switched on; Plesk's copy is not created.
+        $key = $result['state']['client_key']['id'];
+        $writes = $this->writes($calls);
+        $on = array_search('PUT /dns/soa/'.$zones['shop.test.']->id.' 200', $writes, true);
+        $this->assertSame(['PUT /sites/web-child-domains/'.$alias->domain_id.' 200', 'PUT /system/api-keys/'.$key.' 200'],
+            array_slice($writes, $on + 1));
+        $this->assertSame(1, array_count_values($writes)['POST /dns/soa 201']);
+        $this->assertSame((int) $zones['shop.example.']->id, $result['state']['objects']['zone:shop.example']['record']['id']);
+        $this->assertSame([], $this->rejectedZoneWrites('shop.test.'));
+        $this->assertSame([], $this->rejectedZoneWrites('shop.example.'));
+
+        // Repeated, everything is done.
+        $request['state'] = $result['state'];
+        $request['dns_only'] = true;
+        [$again, $calls] = $this->runMigration($request);
+        $this->assertTrue($again['ok'], $again['error'] ?? '');
+        $this->assertSame(['PUT /system/api-keys/'.$key.' 200'], $this->writes($calls));
     }
 
     public function test_limits_that_cannot_fit_the_migration_stop_before_any_write(): void

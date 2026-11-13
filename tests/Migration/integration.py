@@ -282,8 +282,8 @@ def plesk_fixture():
         CREATE TABLE psa.hosting(dom_id INT, www_root VARCHAR(255), sys_user_id INT, php_handler_id VARCHAR(64));
         CREATE TABLE psa.sys_users(id INT, login VARCHAR(64), home VARCHAR(255), shell VARCHAR(255));
         CREATE TABLE psa.clients(id INT, login VARCHAR(64), cname VARCHAR(255), pname VARCHAR(255));
-        CREATE TABLE psa.domain_aliases(id INT, dom_id INT, name VARCHAR(255), status INT, web ENUM('false','true'), seoRedirect ENUM('false','true'),
-            dns_zone_id INT);
+        CREATE TABLE psa.domain_aliases(id INT, dom_id INT, name VARCHAR(255), status INT, web ENUM('false','true'), dns ENUM('false','true'),
+            seoRedirect ENUM('false','true'), dns_zone_id INT);
         CREATE TABLE psa.dns_zone(id INT, name VARCHAR(255), status INT, type ENUM('slave','master'), email VARCHAR(255), ttl INT,
             refresh INT, retry INT, expire INT, minimum INT);
         CREATE TABLE psa.dns_recs(id INT, dns_zone_id INT, type VARCHAR(16), host VARCHAR(255), val TEXT, opt VARCHAR(255), ttl INT);
@@ -298,7 +298,7 @@ def plesk_fixture():
             (3,'%s/httpdocs/blog',1,'alt-php81-fpm'), (4,'%s/addon.test',1,'alt-php81-fpm');
         INSERT INTO psa.sys_users VALUES (1,'shopuser','%s','/usr/local/psa/bin/chrootsh');
         INSERT INTO psa.clients VALUES (1,'shop','Shop s.r.o.','Jana');
-        INSERT INTO psa.domain_aliases VALUES (1,1,'shop.example',0,'true','true',2);
+        INSERT INTO psa.domain_aliases VALUES (1,1,'shop.example',0,'true','true','true',2);
         INSERT INTO psa.dns_zone VALUES (1,'shop.test',0,'master','admin@plesk.test',7200,14400,3600,604800,3600),
             (2,'shop.example',0,'master','admin@plesk.test',7200,14400,3600,604800,3600),
             (3,'addon.test',0,'master','admin@plesk.test',7200,14400,3600,604800,3600);
@@ -397,6 +397,7 @@ def plesk_main():
         assert inventory['site']['subdomain'] == '*' and inventory['site']['system_user'] == 'shopuser'
         assert [(child['domain'], child['type']) for child in inventory['children']] == [('blog.shop.test', 'vhostsubdomain'), ('shop.example', 'alias')]
         assert inventory['not_copied'] == ['private-data'], inventory['not_copied']
+        assert inventory['dns_zones'][-1] == {'id': 2, 'domain': 'shop.example', 'role': 'alias', 'sync': True, 'child': 'a1'}, inventory['dns_zones']
         assert inventory['opcache'] == {'shop.test': 'on', 'blog.shop.test': 'off'}, inventory['opcache']
         assert [job['source'] for job in migration.state['cron_jobs']] == ["/opt/alt/php81/usr/bin/php -f 'httpdocs/feed.php'"]
         assert any(note.startswith('WordPress cron (WP Toolkit, 1 job(s)') for note in inventory['notes']), inventory['notes']

@@ -21,7 +21,7 @@ QUERIES = [
     "'contact',c.pname,'dns_zone_id',d.dns_zone_id) FROM domains d LEFT JOIN hosting h ON h.dom_id=d.id "
     "LEFT JOIN sys_users s ON s.id=h.sys_user_id LEFT JOIN clients c ON c.id=d.cl_id",
     "SELECT JSON_OBJECT('t','alias','id',a.id,'dom_id',a.dom_id,'name',a.name,'status',a.status,"
-    "'web',a.web,'seo_redirect',a.seoRedirect,'dns_zone_id',a.dns_zone_id) FROM domain_aliases a",
+    "'web',a.web,'dns',a.dns,'seo_redirect',a.seoRedirect,'dns_zone_id',a.dns_zone_id) FROM domain_aliases a",
     "SELECT JSON_OBJECT('t','database','id',b.id,'name',b.name,'type',b.type,'dom_id',b.dom_id,"
     "'server_id',b.db_server_id,'default_user_id',b.default_user_id) FROM data_bases b",
     "SELECT JSON_OBJECT('t','dbuser','id',u.id,'login',u.login,'db_id',u.db_id,'dom_id',u.dom_id) FROM db_users u",

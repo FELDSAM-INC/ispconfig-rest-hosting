@@ -280,6 +280,12 @@ in the new ISPConfig are listed and left alone. The copy keeps every record, TTL
   DMARC that ISPConfig's records cannot express (`ptr`, `redirect=`, `+all`, DMARC `fo=`) and record types it does
   not hold (e.g. Plesk's `HTTPS`).
 
+A zone Plesk keeps in step with the domain's (the alias's *Synchronize DNS zone with the primary domain*) stays so:
+once the domain's zone is created, the website alias's DNS synchronization (`dns_sync`, as in the panel) is switched
+on, which copies the domain's zone with the alias for the domain in record names and targets and keeps the alias's
+zone a read-only copy of it. When the domain's zone is not created by the migration, or the alias is used only for
+mail or DNS, Plesk's copy becomes a zone of its own, and the plan says so.
+
 The zones are created with the client's key (its `limit_dns_zone`/`limit_dns_record` are checked in the plan) once
 the copy is complete: each zone inactive, then its records, then switched on, so ISPConfig's DNS server loads it
 once, complete. A record ISPConfig refuses is listed as `MANUAL` and the rest of the zone is still created. Nothing
@@ -507,6 +513,7 @@ delegates to Plesk (and not of its alias hosted elsewhere) and a final sync, and
 Plesk side. `MigrationProvisioningTest` also provisions a Plesk inventory through the real API, including the
 wildcard and cron limits that stop before any write, the PHP versions of the website and its subdomain, and DNS
 zones with SPF, DMARC, DKIM, MX, SRV and delegation records (created inactive, switched on complete, checked by
-replaying the journal like ISPConfig's DNS server, and the client's DNS zone limit).
+replaying the journal like ISPConfig's DNS server, and the client's DNS zone limit), and an alias zone kept in step
+with the domain's through the alias's DNS synchronization.
 These tests are **not a live ISPConfig instance**. A first production migration must
 start with `plan` and an application test before DNS changes.

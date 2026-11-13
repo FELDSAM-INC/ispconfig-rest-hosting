@@ -571,9 +571,12 @@ PLESK_ROWS = [
     plesk_domain(8, 'off.test', root='/var/www/vhosts/off.test/httpdocs', home='/var/www/vhosts/off.test', status=16, login='off'),
     plesk_domain(9, 'mail.test', htype='none'),
     plesk_domain(10, 'nested.test', root='/var/www/vhosts/nested.test/httpdocs/public', home='/var/www/vhosts/nested.test', login='n'),
-    {'t': 'alias', 'id': 1, 'dom_id': 1, 'name': 'shop.example', 'status': 0, 'web': 'true', 'seo_redirect': 'true', 'dns_zone_id': 32},
-    {'t': 'alias', 'id': 2, 'dom_id': 1, 'name': 'shop.other', 'status': 0, 'web': 'true', 'seo_redirect': 'false', 'dns_zone_id': None},
-    {'t': 'alias', 'id': 3, 'dom_id': 1, 'name': 'mail-only.test', 'status': 0, 'web': 'false', 'seo_redirect': 'false', 'dns_zone_id': 34},
+    {'t': 'alias', 'id': 1, 'dom_id': 1, 'name': 'shop.example', 'status': 0, 'web': 'true', 'dns': 'true', 'seo_redirect': 'true',
+     'dns_zone_id': 32},
+    {'t': 'alias', 'id': 2, 'dom_id': 1, 'name': 'shop.other', 'status': 0, 'web': 'true', 'dns': 'false', 'seo_redirect': 'false',
+     'dns_zone_id': None},
+    {'t': 'alias', 'id': 3, 'dom_id': 1, 'name': 'mail-only.test', 'status': 0, 'web': 'false', 'dns': 'true', 'seo_redirect': 'false',
+     'dns_zone_id': 34},
     {'t': 'database', 'id': 11, 'name': 'shop_wp', 'type': 'mysql', 'dom_id': 1, 'server_id': 1, 'default_user_id': None},
     {'t': 'database', 'id': 12, 'name': 'shop-old_db', 'type': 'mysql', 'dom_id': 1, 'server_id': 1, 'default_user_id': 22},
     {'t': 'database', 'id': 13, 'name': 'addon_wp', 'type': 'mysql', 'dom_id': 1, 'server_id': 1, 'default_user_id': None},
@@ -1019,9 +1022,13 @@ class PleskDnsTests(unittest.TestCase):
 
     def test_inventory_lists_the_zones_of_the_website_its_aliases_and_subdomains(self):
         inventory = m.plesk_inventory(PLESK_ROWS, PLESK_ACCOUNT, 'shop.test')
-        self.assertEqual([(31, 'shop.test', 'website'), (35, 'blog.shop.test', 'subdomain'), (34, 'mail-only.test', 'alias'),
-                          (32, 'shop.example', 'alias')],
-                         [(zone['id'], zone['domain'], zone['role']) for zone in inventory['dns_zones']])
+        # Plesk's "Synchronize DNS zone with the primary domain": the website alias's zone follows the domain's.
+        self.assertEqual([(31, 'shop.test', 'website', None, None), (35, 'blog.shop.test', 'subdomain', None, None),
+                          (34, 'mail-only.test', 'alias', True, None), (32, 'shop.example', 'alias', True, 'a1')],
+                         [(zone['id'], zone['domain'], zone['role'], zone.get('sync'), zone.get('child')) for zone in inventory['dns_zones']])
+        # An inventory of an earlier helper without the switch keeps every zone on its own.
+        rows = [dict(row, dns=None) if row['t'] == 'alias' else row for row in PLESK_ROWS]
+        self.assertFalse(any('sync' in zone for zone in m.plesk_inventory(rows, PLESK_ACCOUNT, 'shop.test')['dns_zones']))
 
     def migration(self, objects=None):
         migration = object.__new__(m.Migration)
@@ -1061,12 +1068,84 @@ class PleskDnsTests(unittest.TestCase):
         migration = self.migration({'zone:shop.test': {'record': {'id': 90}}, 'rr:shop.test:0': {'record': {'id': 1}}})
         migration.state['dns'] = {'zones': [{'origin': 'shop.test', 'records': [{}, {}, {}]}, {'origin': 'shop.example', 'records': [{}]}]}
         self.assertEqual({'dns_zones': 1, 'dns_records': 3}, migration.dns_counts())
+        # A zone kept in step gets the records of the domain's zone that ISPConfig accepted.
+        migration.state['dns']['zones'] = [{'origin': 'shop.test', 'records': [{}, {}, {}], 'rejected': [2]},
+                                           {'origin': 'shop.example', 'sync': 'shop.test', 'records': []}]
+        self.assertEqual({'dns_zones': 1, 'dns_records': 3}, migration.dns_counts())
+        migration.state['objects']['zone:shop.example'] = {'record': {'id': 91}}
+        self.assertEqual({'dns_zones': 0, 'dns_records': 1}, migration.dns_counts())
         migration.dns = False
         self.assertEqual({}, migration.dns_counts())
         migration.admin = MagicMock()
         migration.admin.get.return_value = {'web': [], 'dns': []}
         with self.assertRaisesRegex(m.MigrationError, 'no DNS server .* \\(--no-dns\\)'):
             migration.hosting_addresses()
+
+    def test_alias_zones_plesk_keeps_in_step_follow_the_domains_zone(self):
+        rows = [zone_row(31, 'shop.test'), zone_row(32, 'shop.example'), zone_row(34, 'mail-only.test'), {'t': 'ip', 'address': PLESK_IPV4}
+                ] + SHOP_RECORDS + [record_row(30, 32, 'NS', 'shop.example.', 'ns.provider.test.'),
+                                    record_row(31, 34, 'NS', 'mail-only.test.', 'ns.provider.test.')]
+        public = {name: (['ns.provider.test'], None) for name in ('shop.test', 'shop.example', 'mail-only.test')}
+        migration = self.migration()
+        migration.domain = 'shop.test'
+        migration.state['inventory']['dns_zones'] = [
+            {'id': 32, 'domain': 'shop.example', 'role': 'alias', 'sync': True, 'child': 'a1'},
+            {'id': 31, 'domain': 'shop.test', 'role': 'website'},
+            {'id': 34, 'domain': 'mail-only.test', 'role': 'alias', 'sync': True, 'child': None}]
+        plan = migration.dns_plan(rows=rows, lookup=public.get)
+        # After the domain's zone, which the API copies; an alias not migrated for the website keeps Plesk's copy.
+        self.assertEqual([('shop.test', None), ('shop.example', 'shop.test'), ('mail-only.test', None)],
+                         [(zone['origin'], zone.get('sync')) for zone in plan['zones']])
+        self.assertEqual({'origin': 'shop.example', 'sync': 'shop.test', 'child': 'a1', 'records': [], 'remapped': [], 'rewritten': [],
+                          'manual': []}, plan['zones'][1])
+        self.assertEqual('Plesk keeps it in step with shop.test; created as a zone of its own (the alias is not migrated for the '
+                         'website)', plan['zones'][2]['unsynced'])
+        self.assertEqual({('mail-only.test.', 'ns1.target.test.'), ('mail-only.test.', 'ns2.target.test.')},
+                         {(record['name'], record['data']) for record in plan['zones'][2]['records']})
+        output = io.StringIO()
+        with patch('sys.stdout', output):
+            migration.print_dns_plan(plan, when='now')
+        self.assertIn('  shop.example: a copy of shop.test kept in step, as in Plesk (names under shop.test become shop.example)\n',
+                      output.getvalue())
+        self.assertIn('  mail-only.test: Plesk keeps it in step with shop.test; created as a zone of its own', output.getvalue())
+        # Without the domain's zone in the new ISPConfig there is nothing to follow: Plesk's copy, on its own.
+        public['shop.test'] = (['ns1.registrar.test'], None)
+        plan = migration.dns_plan(rows=rows, lookup=public.get)
+        self.assertEqual(['shop.example', 'mail-only.test'], [zone['origin'] for zone in plan['zones']])
+        self.assertEqual('Plesk keeps it in step with shop.test; created as a zone of its own (the zone of shop.test is not created by '
+                         'this migration)', plan['zones'][0]['unsynced'])
+        self.assertEqual({('shop.example.', 'ns1.target.test.'), ('shop.example.', 'ns2.target.test.')},
+                         {(record['name'], record['data']) for record in plan['zones'][0]['records']})
+
+    def test_the_alias_zone_kept_in_step_is_created_once_by_the_aliases_dns_synchronization(self):
+        migration = self.migration({'child:a1': {'record': {'id': 77}}})
+        migration.use_client_key, migration.verify_dns, migration.api = MagicMock(), MagicMock(), MagicMock()
+        services = {'dns_zone_id': 91, 'primary_zone_id': 90, 'primary_domain': 'shop.test', 'dns_sync': True}
+        migration.api.request.return_value = ({'id': 77, 'domain': 'shop.example', 'alias_services': services}, 'cs-9')
+        zone = {'origin': 'shop.example', 'sync': 'shop.test', 'child': 'a1', 'records': [], 'remapped': [], 'rewritten': [], 'manual': []}
+        plan = {'zones': [zone], 'nameservers': []}
+        with patch('sys.stdout', io.StringIO()) as output:
+            migration.create_dns(plan)
+        migration.api.request.assert_called_once_with('PUT', '/sites/web-child-domains/77', {'dns_sync': True})
+        migration.api.wait.assert_called_once_with('cs-9')
+        self.assertEqual({'endpoint': '/dns/soa', 'record': {'id': 91, 'origin': 'shop.example.'}, 'change': 'cs-9'},
+                         migration.state['objects']['zone:shop.example'])
+        self.assertIn('DNS zone created: shop.example (zone ID 91, kept in step with shop.test as in Plesk)', output.getvalue())
+        self.assertTrue(plan['done'])
+        # Repeated (e.g. after a lost connection) it only waits for ISPConfig.
+        migration.api.reset_mock()
+        with patch('sys.stdout', io.StringIO()):
+            migration.sync_alias_zone(zone)
+        migration.api.request.assert_not_called()
+        # An API that did not switch it on, or an alias that does not exist yet, stops without a record of a zone.
+        for objects, body, message in (({'child:a1': {'record': {'id': 77}}}, {'id': 77, 'domain': 'shop.example', 'alias_services': None},
+                                         'DNS synchronization of shop.example was not switched on'),
+                                        ({}, None, 'The alias shop.example is not created yet')):
+            migration.state['objects'] = objects
+            migration.api.request.return_value = (body, None)
+            with self.subTest(message=message), self.assertRaisesRegex(m.MigrationError, message):
+                migration.sync_alias_zone(zone)
+            self.assertNotIn('zone:shop.example', migration.state['objects'])
 
     def test_public_name_servers_come_from_the_resolver(self):
         dns = FakeDns({'shop.test': [('NS', 'ns.provider.test'), ('NS', 'NS2.provider.test')], 'www.shop.test': [('A', PLESK_IPV4)]})
