@@ -206,7 +206,8 @@ class PleskFakeApi(FakeApi):
             PleskFakeApi.php_puts.append((endpoint, payload))
             self.rows[endpoint]['opcache'] = 'on' if payload['php_settings']['opcache.enable'] else 'off'
             return self.rows[endpoint], None
-        if method == 'POST' and (endpoint == '/sites/cron-jobs' or endpoint == '/sites/web-domains' and payload.get('type') == 'vhostsubdomain'):
+        if method == 'POST' and (endpoint == '/sites/cron-jobs' or endpoint == '/sites/web-domains'
+                                 and payload.get('type') in ('vhostsubdomain', 'vhostalias')):
             assert self.key == 'test-scoped-key'
             self.posts += 1
             PleskFakeApi.next_id += 1
@@ -214,6 +215,13 @@ class PleskFakeApi(FakeApi):
             if endpoint == '/sites/web-domains':
                 row['document_root'] = self.rows['/sites/web-domains/104']['document_root']
                 row['hd_quota'] = 0  # ISPConfig: children share the parent's quota
+                if payload['type'] == 'vhostalias':
+                    # ISPConfig creates the folder of a domain with its own folder, owned by the website user.
+                    folder = Path(row['document_root']) / payload['web_folder']
+                    folder.mkdir()
+                    (folder / 'index.html').write_text('ISPConfig skeleton')
+                    for path in (folder, folder / 'index.html'):
+                        shutil.chown(path, 'web104', 'client3')
             self.rows['%s/%d' % (endpoint, row['id'])] = row
             return row, None
         if method == 'POST' and endpoint in ('/sites/database-users', '/sites/databases'):
@@ -336,6 +344,8 @@ def plesk_fixture():
     httpdocs.joinpath('delete-on-sync.txt').write_text('delete later')
     (PLESK_HOME / 'private-data/secret.txt').write_text('not migrated')
     (PLESK_HOME / 'addon.test/index.html').write_text('another website')
+    (PLESK_HOME / 'addon.test/.user.ini').write_text("auto_prepend_file = '%s/addon.test/wordfence-waf.php'\n" % PLESK_HOME)
+    (PLESK_HOME / 'addon.test/media').symlink_to(str(httpdocs / 'wp-content/uploads'))
     subprocess.run(['chown', '-R', 'shopuser:psacln', str(PLESK_HOME)], check=True)
     for path in (Path('/var/www'), Path('/var/www/vhosts')):
         path.chmod(0o755)
@@ -497,11 +507,71 @@ def plesk_main():
         assert [job['source'] for job in migration.state['cron_jobs']] == ["/opt/alt/php81/usr/bin/php -f 'httpdocs/feed.php'"]
         assert 'old secret' not in (Path(state) / 'state.json').read_text()
     public.close()
+    plesk_subscription(config)
     # Nothing was written on the Plesk side: no option files, sources unchanged.
     assert not set(os.listdir('/tmp')) - temporary, set(os.listdir('/tmp')) - temporary
     assert (PLESK_HOME / 'httpdocs/.user.ini').read_text().startswith("auto_prepend_file = '%s/httpdocs" % PLESK_HOME)
     print('PASS (plesk): --sites, inventory, plan, reads as the subscription user, dumps as the Plesk admin, wildcard, alias redirect, '
           'subdomain folder, inactive cron, old paths rewritten and reviewed, WordPress config, symlinks, DNS zones, final sync')
+
+
+def plesk_subscription(config):
+    """--subscription: shop.test with its additional domain addon.test (own folder, cron job) as one new website."""
+    FakeApi.rows.clear()
+    PleskFakeApi.php_puts.clear()
+    target_root = Path('/var/www/clients/client3/web104')
+    shutil.rmtree(target_root)
+    web104 = __import__('pwd').getpwnam('web104').pw_uid
+    with tempfile.TemporaryDirectory(prefix='migration-test-') as state:
+        migration = m.Migration(config, state, 'shop.test', 3)
+        migration.subscription, migration.dns = True, False
+        migration.plan()
+        inventory = migration.state['inventory']
+        assert [(child['domain'], child['type'], child.get('web_folder'), child.get('www_root')) for child in inventory['children']] == [
+            ('blog.shop.test', 'vhostsubdomain', 'web/blog', None), ('shop.example', 'alias', None, None),
+            ('addon.test', 'vhostalias', 'addon.test', str(PLESK_HOME / 'addon.test'))], inventory['children']
+        assert migration.state['subscription'] is True and not any('migrated separately' in note for note in inventory['notes'])
+        # The first scenario's sync added httpdocs/new.php; the additional domain's job now comes with its website.
+        assert sorted(job['source'] for job in migration.state['cron_jobs']) == [
+            "/opt/alt/php81/usr/bin/php -f 'httpdocs/feed.php'", '/opt/alt/php81/usr/bin/php -f httpdocs/new.php',
+            'php %s/addon.test/cron.php' % PLESK_HOME], migration.state['cron_jobs']
+        try:
+            migration.run(source_quiesced=True)
+        except m.MigrationError as exc:
+            assert 'Edit configs in the staged tree' in str(exc), str(exc)  # the .htaccess naming private-data
+        tree = Path(state) / 'round-000/tree'
+        report = m.read_json(tree.parent / 'configuration-report.json')
+        assert report['old_paths_rewritten'] == ['addon.test/.user.ini', 'web/.user.ini', 'web/wordfence-waf.php'], report
+        assert report['old_path_references'] == ['web/.htaccess'], report
+        (tree / 'web/.htaccess').write_text('AuthUserFile %s/private/.htpasswd\n' % target_root)
+        migration.publish(config_reviewed=True)
+        assert (target_root / 'addon.test/index.html').read_text() == 'another website'
+        assert (target_root / 'addon.test/index.html').stat().st_uid == web104
+        assert (target_root / 'addon.test/.user.ini').read_text() == "auto_prepend_file = '%s/addon.test/wordfence-waf.php'\n" % target_root
+        assert os.readlink(target_root / 'addon.test/media') == '../web/wp-content/uploads'
+        assert (target_root / 'addon.test/media/photo.txt').read_text() == 'photo'
+        assert (target_root / 'web/index.php').read_text() == '<?php echo "shop";' and not (target_root / 'web/addon.test').exists()
+        rows = FakeApi.rows
+        domains = [row for key, row in rows.items() if key.startswith('/sites/web-domains/') and row.get('type') == 'vhostalias']
+        assert [(row['domain'], row['web_folder'], row['server_php_id']) for row in domains] == [('addon.test', 'addon.test', 31)], domains
+        cron = sorted(row['command'] for key, row in rows.items() if key.startswith('/sites/cron-jobs/'))
+        assert cron == ['/usr/bin/php8.1 -f %s/web/feed.php' % target_root, '/usr/bin/php8.1 -f %s/web/new.php' % target_root,
+                        '/usr/bin/php8.1 %s/addon.test/cron.php' % target_root], cron
+        # Final sync: the folder is backed up, new and deleted files follow.
+        (PLESK_HOME / 'addon.test/index.html').unlink()
+        (PLESK_HOME / 'addon.test/new.html').write_text('new addon page')
+        subprocess.run(['chown', 'shopuser:psacln', str(PLESK_HOME / 'addon.test/new.html')], check=True)
+        posts = FakeApi.posts
+        try:
+            migration.run(sync=True, source_quiesced=True, target_quiesced=True)
+        except m.MigrationError as exc:
+            assert 'Edit configs in the staged tree' in str(exc), str(exc)
+        (Path(state) / 'round-001/tree/web/.htaccess').write_text('AuthUserFile %s/private/.htpasswd\n' % target_root)
+        migration.publish(config_reviewed=True)
+        assert (Path(state) / 'round-001/before/addon.test/index.html').read_text() == 'another website'
+        assert not (target_root / 'addon.test/index.html').exists() and (target_root / 'addon.test/new.html').read_text() == 'new addon page'
+        assert FakeApi.posts == posts, 'sync must not create objects again'
+    print('PASS (plesk --subscription): additional domain with its own folder, its PHP, cron job, old paths and links, final sync')
 
 
 def main():

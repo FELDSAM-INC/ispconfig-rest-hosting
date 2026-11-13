@@ -5,6 +5,20 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `ispcp-migrate --from plesk example.com CLIENT --subscription` migrates a whole Plesk subscription as one website,
+  as in Plesk's webspace: its additional domains (and subdomains with a folder of their own) become domains with their
+  own folder (`vhostalias`, the folder they have in the webspace, e.g. `shop.example/` next to `web/`), with their
+  Plesk PHP version and OPcache, their files, DNS zones and cron jobs, and all of the subscription's databases. Before,
+  each additional domain was migrated as a website of its own, and the main domain took every database, because
+  Plesk often assigns them all to the subscription's main domain. Later runs keep the option.
+
+### Changed
+
+- A migration whose earlier runs created nothing yet (e.g. only `--plan`) takes over a changed source inventory
+  instead of stopping, so options such as `--subscription` or `--database` can still change.
+
 ## [1.11.2] - 2026-11-13
 
 ### Fixed
